@@ -10,9 +10,9 @@ VEO_API_KEY = os.environ.get('VEO_API_KEY') or getattr(settings, 'VEO_API_KEY', 
 VEO_BASE_URL = os.environ.get('VEO_BASE_URL') or 'https://generativelanguage.googleapis.com/v1beta'
 
 
-def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9'):
+def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', poll_interval=5):
     model = 'veo-3.0-generate-001'
-    url = f'{VEO_BASE_URL}/models/{model}:predict'
+    url = f'{VEO_BASE_URL}/models/{model}:predictLongRunning'
 
     headers = {
         'X-Goog-Api-Key': VEO_API_KEY,
@@ -30,37 +30,58 @@ def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9'):
         },
     }
 
-    resp = requests.post(url, headers=headers, json=body, timeout=300)
+    resp = requests.post(url, headers=headers, json=body, timeout=60)
     if resp.status_code != 200:
         raise Exception(f'Veo API error {resp.status_code}: {resp.text}')
 
-    data = resp.json()
+    operation = resp.json()
+    operation_name = operation.get('name')
+    if not operation_name:
+        raise Exception(f'No operation name in response: {operation}')
 
-    predictions = data.get('predictions', [])
-    if not predictions:
-        raise Exception('No video generated: empty predictions')
+    while True:
+        op_resp = requests.get(
+            f'{VEO_BASE_URL}/{operation_name}',
+            headers={'X-Goog-Api-Key': VEO_API_KEY},
+            timeout=30,
+        )
+        if op_resp.status_code != 200:
+            raise Exception(f'Veo operation poll error {op_resp.status_code}: {op_resp.text}')
 
-    prediction = predictions[0]
+        op_data = op_resp.json()
 
-    if 'video' in prediction:
-        import base64
-        b64 = prediction['video']
-        if isinstance(b64, dict):
-            b64 = b64.get('encodedVideo', '')
-        raw = base64.b64decode(b64)
-        mime_type = prediction.get('mimeType', 'video/mp4')
-        return ContentFile(raw, name=_filename(prompt, mime_type))
+        if op_data.get('done'):
+            if 'error' in op_data:
+                err = op_data['error']
+                raise Exception(f'Veo generation failed: {err.get("message", str(err))}')
 
-    if 'gcsUri' in prediction:
-        file_uri = prediction['gcsUri']
-        return _download_from_gcs(file_uri, prompt)
+            response_data = op_data.get('response', {})
+            predictions = response_data.get('predictions', [])
+            if not predictions:
+                raise Exception('No video generated: empty predictions')
 
-    if 'fileData' in prediction:
-        file_uri = prediction['fileData'].get('fileUri', '')
-        if file_uri:
-            return _download_from_uri(file_uri, prompt)
+            prediction = predictions[0]
 
-    raise Exception(f'Unexpected prediction format: {list(prediction.keys())}')
+            if 'video' in prediction:
+                import base64
+                b64 = prediction['video']
+                if isinstance(b64, dict):
+                    b64 = b64.get('encodedVideo', '')
+                raw = base64.b64decode(b64)
+                mime_type = prediction.get('mimeType', 'video/mp4')
+                return ContentFile(raw, name=_filename(prompt, mime_type))
+
+            if 'gcsUri' in prediction:
+                return _download_from_gcs(prediction['gcsUri'], prompt)
+
+            if 'fileData' in prediction:
+                file_uri = prediction['fileData'].get('fileUri', '')
+                if file_uri:
+                    return _download_from_uri(file_uri, prompt)
+
+            raise Exception(f'Unexpected prediction format: {list(prediction.keys())}')
+
+        time.sleep(poll_interval)
 
 
 def _download_from_gcs(gcs_uri, prompt):

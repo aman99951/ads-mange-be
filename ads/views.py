@@ -120,6 +120,8 @@ class AdViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def generate_video(self, request, pk=None):
+        if not getattr(request.user, 'is_staff', False):
+            return Response({'error': 'Admin only'}, status=403)
         ad = self.get_object()
         if ad.status != 'approved':
             return Response({'error': 'Ad must be approved first'}, status=400)
