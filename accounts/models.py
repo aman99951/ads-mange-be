@@ -9,6 +9,7 @@ class Client(models.Model):
 
     is_authenticated = True
     is_anonymous = False
+    is_staff = False
 
     def __str__(self):
         return f'{self.name or "?"} ({self.mobile})'

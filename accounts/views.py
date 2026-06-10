@@ -148,11 +148,16 @@ def manager_login(request):
         'iat': datetime.utcnow(),
     }
     token = jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
+    manager_name = user.first_name
+    try:
+        manager_name = Manager.objects.get(user=user).name
+    except Manager.DoesNotExist:
+        pass
     return Response({
         'access': token,
         'user': {
             'id': user.id,
-            'name': user.first_name,
+            'name': manager_name,
             'username': user.username,
             'role': 'manager',
         },

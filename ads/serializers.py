@@ -18,7 +18,7 @@ class AdIterationSerializer(serializers.ModelSerializer):
     class Meta:
         model = AdIteration
         fields = '__all__'
-        read_only_fields = ['created_at']
+        read_only_fields = ['created_at', 'ad', 'created_by']
 
 
 class AdListSerializer(serializers.ModelSerializer):
