@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Client, Manager
+from .models import Client, Manager, Developer
 from django.contrib.auth.models import User
 
 
@@ -35,3 +35,22 @@ class ManagerSerializer(serializers.ModelSerializer):
         model = User
         fields = ['id', 'username', 'first_name', 'is_staff', 'date_joined']
         read_only_fields = ['id', 'is_staff', 'date_joined']
+
+
+class DeveloperSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(source='user.username', read_only=True)
+
+    class Meta:
+        model = Developer
+        fields = ['id', 'company_name', 'website', 'api_key', 'username', 'created_at']
+
+
+class RegisterDeveloperSerializer(serializers.Serializer):
+    company_name = serializers.CharField(max_length=255)
+    email = serializers.EmailField()
+    password = serializers.CharField(write_only=True, min_length=6)
+
+
+class DeveloperLoginSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    password = serializers.CharField()

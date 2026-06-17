@@ -8,4 +8,6 @@ urlpatterns = [
     path('create-manager/', views.create_manager, name='create-manager'),
     path('managers/', views.list_managers, name='list-managers'),
     path('manager-login/', views.manager_login, name='manager-login'),
+    path('developer-register/', views.developer_register, name='developer-register'),
+    path('developer-login/', views.developer_login, name='developer-login'),
 ]

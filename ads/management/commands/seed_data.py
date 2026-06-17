@@ -1,5 +1,5 @@
 from django.core.management.base import BaseCommand
-from ads.models import TargetArea, TargetAudience
+from ads.models import TargetArea, TargetAudience, Language
 
 
 CHENNAI_LOCALITIES = [
@@ -13,6 +13,19 @@ CHENNAI_LOCALITIES = [
     "Poonamallee", "Avadi", "Ambattur", "Mogappair", "Kolathur",
     "Villivakkam", "Perambur", "George Town", "Washermenpet", "Thondiarpet",
     "Tiruvottiyur", "Manali", "Minjur", "Red Hills", "Ennore",
+]
+
+LANGUAGES = [
+    "Tamil",
+    "English",
+    "Hindi",
+    "Telugu",
+    "Kannada",
+    "Malayalam",
+    "Gujarati",
+    "Marathi",
+    "Bengali",
+    "Urdu",
 ]
 
 AUDIENCE_PROFILES = [
@@ -58,6 +71,13 @@ class Command(BaseCommand):
             if was_created:
                 created_audiences += 1
 
+        created_languages = 0
+        for name in LANGUAGES:
+            _, was_created = Language.objects.get_or_create(name=name)
+            if was_created:
+                created_languages += 1
+
         self.stdout.write(self.style.SUCCESS(
-            f"Seeded {created_areas} target areas and {created_audiences} target audiences"
+            f"Seeded {created_areas} target areas, {created_audiences} target audiences, "
+            f"and {created_languages} languages"
         ))

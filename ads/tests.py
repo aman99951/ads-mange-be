@@ -6,7 +6,7 @@ from django.contrib.auth.models import User
 from rest_framework.test import APIClient
 from rest_framework import status
 from accounts.models import Client, Manager
-from .models import TargetArea, TargetAudience, Ad
+from .models import TargetArea, TargetAudience, Language, Ad
 
 
 class AdsAPITests(TestCase):
@@ -31,6 +31,7 @@ class AdsAPITests(TestCase):
         self.area = TargetArea.objects.create(state='Test State', city='Test City', locality='Area 1')
         self.area2 = TargetArea.objects.create(state='Test State', city='Test City', locality='Area 2')
         self.audience = TargetAudience.objects.create(age_min=18, age_max=35, profile='Engineers')
+        self.language = Language.objects.create(name='Tamil')
 
     def _make_client_token(self, client):
         payload = {
@@ -254,25 +255,32 @@ class AdsAPITests(TestCase):
     def test_generate_video_by_non_staff(self):
         self._auth(self.client_token)
         ad = Ad.objects.create(client=self.client_user, title='Gen Video', status='approved')
-        response = self.client.post(f'{self.ads_url}{ad.id}/generate_video/')
+        response = self.client.post(f'{self.ads_url}{ad.id}/generate_video/', {'language_id': self.language.id}, format='json')
         self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_generate_video_not_approved(self):
         self._auth(self.staff_token)
         ad = Ad.objects.create(client=self.client_user, title='Not Approved', status='draft')
-        response = self.client.post(f'{self.ads_url}{ad.id}/generate_video/')
+        response = self.client.post(f'{self.ads_url}{ad.id}/generate_video/', {'language_id': self.language.id}, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_generate_video_no_content(self):
         self._auth(self.staff_token)
         ad = Ad.objects.create(client=self.client_user, title='', status='approved')
-        response = self.client.post(f'{self.ads_url}{ad.id}/generate_video/')
+        response = self.client.post(f'{self.ads_url}{ad.id}/generate_video/', {'language_id': self.language.id}, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_generate_video_missing_language(self):
+        self._auth(self.staff_token)
+        ad = Ad.objects.create(client=self.client_user, title='Test Gen', description='A video', status='approved')
+        response = self.client.post(f'{self.ads_url}{ad.id}/generate_video/', {}, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('language_id', response.data['error'])
 
     def test_generate_video_starts_generation(self):
         self._auth(self.staff_token)
         ad = Ad.objects.create(client=self.client_user, title='Test Gen', description='A video about testing', status='approved')
-        response = self.client.post(f'{self.ads_url}{ad.id}/generate_video/')
+        response = self.client.post(f'{self.ads_url}{ad.id}/generate_video/', {'language_id': self.language.id}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('started', response.data['message'])
 

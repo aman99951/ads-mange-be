@@ -100,6 +100,7 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 CORS_ALLOW_ALL_ORIGINS = DEBUG
 CORS_ALLOWED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',') if not DEBUG and os.environ.get('CORS_ALLOWED_ORIGINS') else []
+CORS_ALLOW_HEADERS = ['*']
 
 VEO_API_KEY = os.environ.get('VEO_API_KEY', '')
 VEO_BASE_URL = os.environ.get('VEO_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta')

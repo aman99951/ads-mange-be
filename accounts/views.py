@@ -8,10 +8,11 @@ from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
-from .models import Client, Manager
+from .models import Client, Manager, Developer
 from .serializers import (
     SendOTPSerializer, VerifyOTPSerializer, ClientSerializer,
-    RegisterSerializer, CreateManagerSerializer, ManagerSerializer
+    RegisterSerializer, CreateManagerSerializer, ManagerSerializer,
+    DeveloperSerializer, RegisterDeveloperSerializer, DeveloperLoginSerializer
 )
 
 otp_store = {}
@@ -161,4 +162,73 @@ def manager_login(request):
             'username': user.username,
             'role': 'manager',
         },
+    })
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def developer_register(request):
+    serializer = RegisterDeveloperSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    data = serializer.validated_data
+    email = data['email']
+    if User.objects.filter(username=email).exists():
+        return Response({'error': 'Email already registered'}, status=status.HTTP_400_BAD_REQUEST)
+
+    user = User.objects.create_user(
+        username=email,
+        email=email,
+        password=data['password'],
+    )
+    dev = Developer.objects.create(
+        user=user,
+        company_name=data['company_name'],
+    )
+
+    payload = {
+        'user_id': user.id,
+        'role': 'developer',
+        'exp': datetime.utcnow() + timedelta(days=30),
+        'iat': datetime.utcnow(),
+    }
+    token = jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
+
+    return Response({
+        'access': token,
+        'user': DeveloperSerializer(dev).data,
+    }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def developer_login(request):
+    serializer = DeveloperLoginSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    email = serializer.validated_data['email']
+    password = serializer.validated_data['password']
+    from django.contrib.auth import authenticate
+    user = authenticate(username=email, password=password)
+    if user is None:
+        return Response({'error': 'Invalid credentials'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    try:
+        dev = Developer.objects.get(user=user, is_active=True)
+    except Developer.DoesNotExist:
+        return Response({'error': 'Developer account not found or inactive'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    payload = {
+        'user_id': user.id,
+        'role': 'developer',
+        'exp': datetime.utcnow() + timedelta(days=30),
+        'iat': datetime.utcnow(),
+    }
+    token = jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
+
+    return Response({
+        'access': token,
+        'user': DeveloperSerializer(dev).data,
     })

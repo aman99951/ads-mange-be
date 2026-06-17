@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django import forms
 from django.contrib.auth.models import User
-from .models import Client, Manager
+from .models import Client, Manager, Developer
 
 
 class ManagerForm(forms.ModelForm):
@@ -56,3 +56,10 @@ class ManagerAdmin(admin.ModelAdmin):
     form = ManagerForm
     list_display = ['name', 'mobile', 'user']
     search_fields = ['name', 'mobile']
+
+
+@admin.register(Developer)
+class DeveloperAdmin(admin.ModelAdmin):
+    list_display = ['company_name', 'api_key', 'is_active', 'created_at']
+    search_fields = ['company_name', 'user__email']
+    readonly_fields = ['api_key']

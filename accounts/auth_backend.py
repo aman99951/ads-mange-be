@@ -3,7 +3,7 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
-from .models import Client
+from .models import Client, Developer
 
 
 class ClientJWTAuthentication(BaseAuthentication):
@@ -37,5 +37,13 @@ class ClientJWTAuthentication(BaseAuthentication):
             except User.DoesNotExist:
                 raise AuthenticationFailed('User not found')
             return (user, token)
+
+        if role == 'developer':
+            user_id = payload.get('user_id')
+            try:
+                dev = Developer.objects.get(user_id=user_id, is_active=True)
+            except Developer.DoesNotExist:
+                raise AuthenticationFailed('Developer not found or inactive')
+            return (dev.user, token)
 
         raise AuthenticationFailed('Unknown role')
