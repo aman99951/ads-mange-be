@@ -13,5 +13,6 @@ router.register(r'developer/apps', views.DeveloperAppViewSet, basename='develope
 urlpatterns = [
     path('', include(router.urls)),
     path('admin/target-areas/', views.admin_target_areas, name='admin-target-areas'),
+    path('enhance-prompt/', views.enhance_prompt, name='enhance-prompt'),
     path('public/ads/', views.public_ads, name='public-ads'),
 ]

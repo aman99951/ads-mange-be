@@ -7,6 +7,9 @@ from .models import Client, Developer
 
 
 class ClientJWTAuthentication(BaseAuthentication):
+    def authenticate_header(self, request):
+        return 'Bearer realm="api"'
+
     def authenticate(self, request):
         auth = request.headers.get('Authorization', '')
         if not auth.startswith('Bearer '):

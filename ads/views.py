@@ -15,6 +15,8 @@ from .serializers import (
     DeveloperAdListSerializer
 )
 from .services.veo import generate_video_from_text
+from .services.imagen import generate_image_from_text
+from .services.openrouter import enhance_prompt as enhance_prompt_service
 
 
 class TargetAreaViewSet(viewsets.ReadOnlyModelViewSet):
@@ -338,6 +340,131 @@ class AdViewSet(viewsets.ModelViewSet):
         return Response(data)
 
 
+    @action(detail=False, methods=['post'])
+    def generate_image(self, request):
+        """Generate an image from a text prompt using Imagen API."""
+        if not getattr(request.user, 'is_staff', False):
+            return Response({'error': 'Admin only'}, status=403)
+
+        prompt = request.data.get('prompt', '').strip()
+        if not prompt:
+            return Response({'error': 'prompt is required'}, status=400)
+
+        aspect_ratio = request.data.get('aspect_ratio', '1:1')
+
+        try:
+            image_file = generate_image_from_text(prompt, aspect_ratio=aspect_ratio)
+            # Save as a temporary creative asset
+            from django.core.files.storage import default_storage
+            from django.core.files.base import ContentFile
+            path = default_storage.save(f'creative_images/{image_file.name}', ContentFile(image_file.read()))
+            url = request.build_absolute_uri(default_storage.url(path))
+            return Response({
+                'url': url,
+                'path': path,
+                'prompt': prompt,
+                'aspect_ratio': aspect_ratio,
+            })
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+    @action(detail=False, methods=['post'])
+    def generate_video_clip(self, request):
+        """Generate a video clip from a text prompt using Veo API (standalone)."""
+        if not getattr(request.user, 'is_staff', False):
+            return Response({'error': 'Admin only'}, status=403)
+
+        prompt = request.data.get('prompt', '').strip()
+        if not prompt:
+            return Response({'error': 'prompt is required'}, status=400)
+
+        duration = request.data.get('duration_seconds', 8)
+        aspect_ratio = request.data.get('aspect_ratio', '16:9')
+
+        try:
+            video_file = generate_video_from_text(prompt, duration_seconds=duration, aspect_ratio=aspect_ratio)
+            from django.core.files.storage import default_storage
+            from django.core.files.base import ContentFile
+            path = default_storage.save(f'creative_videos/{video_file.name}', ContentFile(video_file.read()))
+            url = request.build_absolute_uri(default_storage.url(path))
+            return Response({
+                'url': url,
+                'path': path,
+                'prompt': prompt,
+                'duration_seconds': duration,
+                'aspect_ratio': aspect_ratio,
+            })
+        except Exception as e:
+            return Response({'error': str(e)}, status=500)
+
+    @action(detail=False, methods=['post'])
+    def create_creative(self, request):
+        """Create an ad directly as a manager (bypasses client submission)."""
+        if not getattr(request.user, 'is_staff', False):
+            return Response({'error': 'Admin only'}, status=403)
+
+        title = request.data.get('title', '').strip()
+        if not title:
+            return Response({'error': 'title is required'}, status=400)
+
+        description = request.data.get('description', '').strip()
+        image_url = request.data.get('image_url', '').strip()
+        video_url = request.data.get('video_url', '').strip()
+        target_area_ids = request.data.get('target_area_ids', [])
+        target_audience_ids = request.data.get('target_audience_ids', [])
+        language_ids = request.data.get('language_ids', [])
+        scheduled_start = request.data.get('scheduled_start', None)
+        scheduled_end = request.data.get('scheduled_end', None)
+
+        ad = Ad.objects.create(
+            client=request.user,
+            title=title,
+            description=description,
+            status='approved',
+            scheduled_start=scheduled_start or None,
+            scheduled_end=scheduled_end or None,
+        )
+
+        if target_area_ids:
+            ad.target_areas.set(TargetArea.objects.filter(id__in=target_area_ids))
+        if target_audience_ids:
+            ad.target_audiences.set(TargetAudience.objects.filter(id__in=target_audience_ids))
+        if language_ids:
+            ad.languages.set(Language.objects.filter(id__in=language_ids))
+
+        # Handle image upload
+        if 'image_file' in request.FILES:
+            ad.asset = request.FILES['image_file']
+        elif image_url:
+            # Try to copy from creative_images path
+            import os
+            from django.conf import settings
+            local_path = image_url.replace(request.build_absolute_uri('/'), '')
+            full_path = os.path.join(settings.MEDIA_ROOT, local_path) if hasattr(settings, 'MEDIA_ROOT') else None
+            if full_path and os.path.exists(full_path):
+                from django.core.files import File
+                with open(full_path, 'rb') as f:
+                    ad.asset.save(os.path.basename(full_path), File(f), save=False)
+
+        # Handle video
+        if 'video_file' in request.FILES:
+            ad.final_asset = request.FILES['video_file']
+        elif video_url:
+            import os
+            from django.conf import settings
+            local_path = video_url.replace(request.build_absolute_uri('/'), '')
+            full_path = os.path.join(settings.MEDIA_ROOT, local_path) if hasattr(settings, 'MEDIA_ROOT') else None
+            if full_path and os.path.exists(full_path):
+                from django.core.files import File
+                with open(full_path, 'rb') as f:
+                    ad.final_asset.save(os.path.basename(full_path), File(f), save=False)
+
+        ad.save()
+
+        serializer = AdDetailSerializer(ad, context={'request': request})
+        return Response(serializer.data, status=201)
+
+
 class DeveloperAppViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
     serializer_class = DeveloperAppSerializer
@@ -413,6 +540,33 @@ class DeveloperAdViewSet(viewsets.ReadOnlyModelViewSet):
             for p in pushes
         ]
         return Response(data)
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def enhance_prompt(request):
+    """
+    Enhance a generation prompt using OpenRouter AI.
+    Preserves the user's language and adds rich detail.
+    """
+    prompt = request.data.get('prompt', '').strip()
+    if not prompt:
+        return Response({'error': 'prompt is required'}, status=400)
+
+    media_type = request.data.get('media_type', 'image')
+    width = request.data.get('width', 1024)
+    height = request.data.get('height', 1024)
+
+    try:
+        result = enhance_prompt_service(prompt, media_type=media_type, width=width, height=height)
+        return Response({
+            'original': prompt,
+            'enhanced': result['enhanced'],
+            'negative_prompt': result['negative_prompt'],
+            'media_type': media_type,
+        })
+    except Exception as e:
+        return Response({'error': str(e)}, status=500)
 
 
 @api_view(['GET', 'POST'])

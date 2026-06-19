@@ -105,6 +105,8 @@ CORS_ALLOW_HEADERS = ['*']
 VEO_API_KEY = os.environ.get('VEO_API_KEY', '')
 VEO_BASE_URL = os.environ.get('VEO_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta')
 
+OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
+
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'accounts.auth_backend.ClientJWTAuthentication',
