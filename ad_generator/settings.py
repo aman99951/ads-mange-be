@@ -105,6 +105,9 @@ CORS_ALLOW_HEADERS = ['*']
 VEO_API_KEY = os.environ.get('VEO_API_KEY', '')
 VEO_BASE_URL = os.environ.get('VEO_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta')
 
+GOOGLE_CLOUD_PROJECT_ID = os.environ.get('GOOGLE_CLOUD_PROJECT_ID', '')
+GOOGLE_CLOUD_PROJECT_NUMBER = os.environ.get('GOOGLE_CLOUD_PROJECT_NUMBER', '')
+GOOGLE_API_DAILY_QUOTA = int(os.environ.get('GOOGLE_API_DAILY_QUOTA', 1500))
 OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY', '')
 
 REST_FRAMEWORK = {

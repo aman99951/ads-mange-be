@@ -15,4 +15,6 @@ urlpatterns = [
     path('admin/target-areas/', views.admin_target_areas, name='admin-target-areas'),
     path('enhance-prompt/', views.enhance_prompt, name='enhance-prompt'),
     path('public/ads/', views.public_ads, name='public-ads'),
+    path('models/', views.available_models, name='available-models'),
+    path('usage-stats/', views.api_usage_stats, name='api-usage-stats'),
 ]

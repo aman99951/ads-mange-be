@@ -4,18 +4,20 @@ import time
 import requests
 from django.conf import settings
 from django.core.files.base import ContentFile
+from .google_quota import QuotaExceededError, mark_quota_exhausted, update_ratelimit_from_headers
 
 
 VEO_API_KEY = os.environ.get('VEO_API_KEY') or getattr(settings, 'VEO_API_KEY', '')
 VEO_BASE_URL = os.environ.get('VEO_BASE_URL') or 'https://generativelanguage.googleapis.com/v1beta'
 
 
-def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', poll_interval=5):
-    model = 'veo-3.0-generate-001'
+def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', poll_interval=5, model_name=None, api_key=None):
+    model = model_name or 'veo-3.0-generate-001'
     url = f'{VEO_BASE_URL}/models/{model}:predictLongRunning'
+    effective_key = api_key or VEO_API_KEY
 
     headers = {
-        'X-Goog-Api-Key': VEO_API_KEY,
+        'X-Goog-Api-Key': effective_key,
         'Content-Type': 'application/json',
     }
 
@@ -31,9 +33,13 @@ def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', po
     }
 
     resp = requests.post(url, headers=headers, json=body, timeout=60)
+    resp_headers = dict(resp.headers)
+    if resp.status_code == 429:
+        update_ratelimit_from_headers(resp_headers)
+        mark_quota_exhausted(resp.text)
+        raise QuotaExceededError(resp.text, response_headers=resp_headers)
     if resp.status_code != 200:
         raise Exception(f'Veo API error {resp.status_code}: {resp.text}')
-
     operation = resp.json()
     operation_name = operation.get('name')
     if not operation_name:
@@ -42,7 +48,7 @@ def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', po
     while True:
         op_resp = requests.get(
             f'{VEO_BASE_URL}/{operation_name}',
-            headers={'X-Goog-Api-Key': VEO_API_KEY},
+            headers={'X-Goog-Api-Key': effective_key},
             timeout=30,
         )
         if op_resp.status_code != 200:
@@ -69,15 +75,15 @@ def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', po
                     b64 = b64.get('encodedVideo', '')
                 raw = base64.b64decode(b64)
                 mime_type = prediction.get('mimeType', 'video/mp4')
-                return ContentFile(raw, name=_filename(prompt, mime_type))
+                return ContentFile(raw, name=_filename(prompt, mime_type)), resp_headers
 
             if 'gcsUri' in prediction:
-                return _download_from_gcs(prediction['gcsUri'], prompt)
+                return _download_from_gcs(prediction['gcsUri'], prompt), resp_headers
 
             if 'fileData' in prediction:
                 file_uri = prediction['fileData'].get('fileUri', '')
                 if file_uri:
-                    return _download_from_uri(file_uri, prompt)
+                    return _download_from_uri(file_uri, prompt, effective_key), resp_headers
 
             raise Exception(f'Unexpected prediction format: {list(prediction.keys())}')
 
@@ -100,8 +106,8 @@ def _download_from_gcs(gcs_uri, prompt):
     return ContentFile(raw, name=_filename(prompt, content_type))
 
 
-def _download_from_uri(file_uri, prompt):
-    headers = {'X-Goog-Api-Key': VEO_API_KEY}
+def _download_from_uri(file_uri, prompt, api_key=None):
+    headers = {'X-Goog-Api-Key': api_key or VEO_API_KEY}
     resp = requests.get(file_uri, headers=headers, stream=True, timeout=120)
     if resp.status_code != 200:
         raise Exception(f'Failed to download video from {file_uri}: {resp.status_code}')

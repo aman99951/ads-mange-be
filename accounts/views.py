@@ -1,7 +1,6 @@
 import random
 import jwt
 from datetime import datetime, timedelta
-from django.utils import timezone
 from django.conf import settings
 from django.contrib.auth.models import User
 from rest_framework import status
@@ -14,6 +13,7 @@ from .serializers import (
     RegisterSerializer, CreateManagerSerializer, ManagerSerializer,
     DeveloperSerializer, RegisterDeveloperSerializer, DeveloperLoginSerializer
 )
+
 
 otp_store = {}
 
@@ -151,7 +151,8 @@ def manager_login(request):
     token = jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
     manager_name = user.first_name
     try:
-        manager_name = Manager.objects.get(user=user).name
+        manager_obj = Manager.objects.get(user=user)
+        manager_name = manager_obj.name
     except Manager.DoesNotExist:
         pass
     return Response({
@@ -199,6 +200,34 @@ def developer_register(request):
         'access': token,
         'user': DeveloperSerializer(dev).data,
     }, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAuthenticated])
+def manager_api_key(request):
+    if not getattr(request.user, 'is_staff', False):
+        return Response({'error': 'Only managers can access this'}, status=status.HTTP_403_FORBIDDEN)
+
+    try:
+        manager = Manager.objects.get(user=request.user)
+    except Manager.DoesNotExist:
+        return Response({'error': 'Manager profile not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == 'GET':
+        return Response({
+            'has_api_key': bool(manager.google_api_key),
+            'api_key': manager.google_api_key if manager.google_api_key else '',
+        })
+
+    # PUT — update API key
+    api_key = request.data.get('api_key', '').strip()
+    manager.google_api_key = api_key
+    manager.save()
+    return Response({
+        'message': 'API key updated',
+        'has_api_key': bool(manager.google_api_key),
+        'api_key': manager.google_api_key,
+    })
 
 
 @api_view(['POST'])

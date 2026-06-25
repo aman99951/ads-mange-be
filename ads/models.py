@@ -1,5 +1,47 @@
 from django.db import models
+from django.utils import timezone
+from django.conf import settings
 import uuid
+from .services.google_quota import (
+    update_ratelimit_from_headers,
+    get_cached_ratelimit,
+    is_quota_exhausted,
+    get_quota_error,
+)
+
+
+def get_remaining_quota():
+    result = {
+        'exhausted': is_quota_exhausted(),
+    }
+    error = get_quota_error()
+    if error:
+        result['error'] = error
+    ratelimit = get_cached_ratelimit()
+    if ratelimit:
+        result['google_rate_limit'] = ratelimit
+    return result
+
+
+def log_api_usage(model_id, success=True, response_headers=None):
+    if response_headers:
+        update_ratelimit_from_headers(dict(response_headers))
+    return get_remaining_quota()
+
+
+class ApiUsageLog(models.Model):
+    """Tracks each Google API request made for quota management."""
+    model_id = models.CharField(max_length=100, help_text='Google model ID used')
+    success = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'API Usage Log'
+        verbose_name_plural = 'API Usage Logs'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.model_id} at {self.created_at}'
 
 
 class TargetArea(models.Model):

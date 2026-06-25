@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush
+from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, ApiUsageLog
 
 
 @admin.register(TargetArea)
@@ -52,3 +52,10 @@ class DeveloperAppAdmin(admin.ModelAdmin):
 @admin.register(AdDeveloperPush)
 class AdDeveloperPushAdmin(admin.ModelAdmin):
     list_display = ['ad', 'app', 'pushed_at']
+
+
+@admin.register(ApiUsageLog)
+class ApiUsageLogAdmin(admin.ModelAdmin):
+    list_display = ['model_id', 'success', 'created_at']
+    list_filter = ['model_id', 'success']
+    date_hierarchy = 'created_at'

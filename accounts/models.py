@@ -20,6 +20,7 @@ class Manager(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     mobile = models.CharField(max_length=15, unique=True)
     name = models.CharField(max_length=255)
+    google_api_key = models.CharField(max_length=200, blank=True, default='')
 
     def __str__(self):
         return f'{self.name} ({self.mobile})'

@@ -6,7 +6,7 @@ from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
 from rest_framework.response import Response
-from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush
+from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, get_remaining_quota, log_api_usage
 from .serializers import (
     TargetAreaSerializer, TargetAudienceSerializer, LanguageSerializer,
     AdListSerializer, AdDetailSerializer, AdStatusSerializer,
@@ -16,7 +16,36 @@ from .serializers import (
 )
 from .services.veo import generate_video_from_text
 from .services.imagen import generate_image_from_text
+from .services.nano_banana import generate_nano_banana_image
 from .services.openrouter import enhance_prompt as enhance_prompt_service
+from .services.google_models import get_model_info, IMAGE_MODELS, VIDEO_MODELS
+from .services.google_quota import QuotaExceededError
+from accounts.models import Manager
+
+
+def _get_manager_api_key(user):
+    try:
+        manager = Manager.objects.get(user=user)
+        return manager.google_api_key or None
+    except Manager.DoesNotExist:
+        return None
+
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def available_models(request):
+    """Return list of available Google models with credit costs."""
+    return Response({
+        'image_models': IMAGE_MODELS,
+        'video_models': VIDEO_MODELS,
+    })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def api_usage_stats(request):
+    quota = get_remaining_quota()
+    return Response(quota)
 
 
 class TargetAreaViewSet(viewsets.ReadOnlyModelViewSet):
@@ -197,9 +226,12 @@ class AdViewSet(viewsets.ModelViewSet):
         asset_obj.error = ''
         asset_obj.save()
 
+        manager_api_key = _get_manager_api_key(request.user)
+
         def _generate(asset):
+            nonlocal manager_api_key
             try:
-                video_file = generate_video_from_text(asset.prompt)
+                video_file, _ = generate_video_from_text(asset.prompt, api_key=manager_api_key)
                 asset.asset.save(video_file.name, video_file, save=True)
                 asset.status = 'completed'
                 asset.error = ''
@@ -342,7 +374,7 @@ class AdViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def generate_image(self, request):
-        """Generate an image from a text prompt using Imagen API."""
+        """Generate an image from a text prompt using Google's Imagen API."""
         if not getattr(request.user, 'is_staff', False):
             return Response({'error': 'Admin only'}, status=403)
 
@@ -351,26 +383,49 @@ class AdViewSet(viewsets.ModelViewSet):
             return Response({'error': 'prompt is required'}, status=400)
 
         aspect_ratio = request.data.get('aspect_ratio', '1:1')
+        model_id = request.data.get('model', 'imagen-3.0-generate-001')
+
+        # Validate model
+        model_info = get_model_info(model_id)
+        if not model_info:
+            return Response({'error': f'Unknown model: {model_id}'}, status=400)
 
         try:
-            image_file = generate_image_from_text(prompt, aspect_ratio=aspect_ratio)
-            # Save as a temporary creative asset
+            api_key = _get_manager_api_key(request.user)
+            api_type = model_info.get('api_type', 'predictLongRunning')
+            if api_type == 'interactions':
+                image_file, resp_headers = generate_nano_banana_image(prompt, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key)
+            else:
+                image_file, resp_headers = generate_image_from_text(prompt, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key)
+
+            log_api_usage(model_id, success=True, response_headers=resp_headers)
+
             from django.core.files.storage import default_storage
             from django.core.files.base import ContentFile
             path = default_storage.save(f'creative_images/{image_file.name}', ContentFile(image_file.read()))
             url = request.build_absolute_uri(default_storage.url(path))
+
             return Response({
                 'url': url,
                 'path': path,
                 'prompt': prompt,
                 'aspect_ratio': aspect_ratio,
+                'model_used': model_id,
+                'google_api_quota': get_remaining_quota(),
             })
+        except QuotaExceededError as e:
+            quota = get_remaining_quota()
+            return Response({
+                'error': str(e),
+                'quota': quota,
+                'google_api_quota': quota,
+            }, status=429)
         except Exception as e:
             return Response({'error': str(e)}, status=500)
 
     @action(detail=False, methods=['post'])
     def generate_video_clip(self, request):
-        """Generate a video clip from a text prompt using Veo API (standalone)."""
+        """Generate a video clip from a text prompt using Google's Veo API."""
         if not getattr(request.user, 'is_staff', False):
             return Response({'error': 'Admin only'}, status=403)
 
@@ -380,20 +435,40 @@ class AdViewSet(viewsets.ModelViewSet):
 
         duration = request.data.get('duration_seconds', 8)
         aspect_ratio = request.data.get('aspect_ratio', '16:9')
+        model_id = request.data.get('model', 'veo-3.0-generate-001')
+
+        # Validate model
+        model_info = get_model_info(model_id)
+        if not model_info:
+            return Response({'error': f'Unknown model: {model_id}'}, status=400)
 
         try:
-            video_file = generate_video_from_text(prompt, duration_seconds=duration, aspect_ratio=aspect_ratio)
+            api_key = _get_manager_api_key(request.user)
+            video_file, resp_headers = generate_video_from_text(prompt, duration_seconds=duration, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key)
+
+            log_api_usage(model_id, success=True, response_headers=resp_headers)
+
             from django.core.files.storage import default_storage
             from django.core.files.base import ContentFile
             path = default_storage.save(f'creative_videos/{video_file.name}', ContentFile(video_file.read()))
             url = request.build_absolute_uri(default_storage.url(path))
+
             return Response({
                 'url': url,
                 'path': path,
                 'prompt': prompt,
                 'duration_seconds': duration,
                 'aspect_ratio': aspect_ratio,
+                'model_used': model_id,
+                'google_api_quota': get_remaining_quota(),
             })
+        except QuotaExceededError as e:
+            quota = get_remaining_quota()
+            return Response({
+                'error': str(e),
+                'quota': quota,
+                'google_api_quota': quota,
+            }, status=429)
         except Exception as e:
             return Response({'error': str(e)}, status=500)
 

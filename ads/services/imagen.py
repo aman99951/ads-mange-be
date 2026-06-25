@@ -5,19 +5,20 @@ import base64
 import requests
 from django.conf import settings
 from django.core.files.base import ContentFile
+from .google_quota import QuotaExceededError, mark_quota_exhausted, update_ratelimit_from_headers
 
 
 IMAGEN_API_KEY = os.environ.get('VEO_API_KEY') or getattr(settings, 'VEO_API_KEY', '')
 IMAGEN_BASE_URL = os.environ.get('VEO_BASE_URL') or 'https://generativelanguage.googleapis.com/v1beta'
 
 
-def generate_image_from_text(prompt, aspect_ratio='1:1', sample_count=1, poll_interval=3):
-    """Generate an image from a text prompt using Google's Imagen API."""
-    model = 'imagen-3.0-generate-001'
+def generate_image_from_text(prompt, aspect_ratio='1:1', sample_count=1, poll_interval=3, model_name=None, api_key=None):
+    model = model_name or 'imagen-4.0-generate-001'
     url = f'{IMAGEN_BASE_URL}/models/{model}:predictLongRunning'
+    effective_key = api_key or IMAGEN_API_KEY
 
     headers = {
-        'X-Goog-Api-Key': IMAGEN_API_KEY,
+        'X-Goog-Api-Key': effective_key,
         'Content-Type': 'application/json',
     }
 
@@ -32,9 +33,13 @@ def generate_image_from_text(prompt, aspect_ratio='1:1', sample_count=1, poll_in
     }
 
     resp = requests.post(url, headers=headers, json=body, timeout=60)
+    resp_headers = dict(resp.headers)
+    if resp.status_code == 429:
+        update_ratelimit_from_headers(resp_headers)
+        mark_quota_exhausted(resp.text)
+        raise QuotaExceededError(resp.text, response_headers=resp_headers)
     if resp.status_code != 200:
         raise Exception(f'Imagen API error {resp.status_code}: {resp.text}')
-
     operation = resp.json()
     operation_name = operation.get('name')
     if not operation_name:
@@ -43,7 +48,7 @@ def generate_image_from_text(prompt, aspect_ratio='1:1', sample_count=1, poll_in
     while True:
         op_resp = requests.get(
             f'{IMAGEN_BASE_URL}/{operation_name}',
-            headers={'X-Goog-Api-Key': IMAGEN_API_KEY},
+            headers={'X-Goog-Api-Key': effective_key},
             timeout=30,
         )
         if op_resp.status_code != 200:
@@ -69,18 +74,17 @@ def generate_image_from_text(prompt, aspect_ratio='1:1', sample_count=1, poll_in
                     b64 = b64.get('bytesImage', '')
                 raw = base64.b64decode(b64)
                 mime_type = prediction.get('mimeType', 'image/png')
-                return ContentFile(raw, name=_img_filename(prompt, mime_type))
+                return ContentFile(raw, name=_img_filename(prompt, mime_type)), resp_headers
 
             if 'bytesBase64Encoded' in prediction:
                 raw = base64.b64decode(prediction['bytesBase64Encoded'])
                 mime_type = prediction.get('mimeType', 'image/png')
-                return ContentFile(raw, name=_img_filename(prompt, mime_type))
+                return ContentFile(raw, name=_img_filename(prompt, mime_type)), resp_headers
 
-            # Fallback: check for encodedImage
             encoded = prediction.get('encodedImage', '')
             if encoded:
                 raw = base64.b64decode(encoded)
-                return ContentFile(raw, name=_img_filename(prompt, 'image/png'))
+                return ContentFile(raw, name=_img_filename(prompt, 'image/png')), resp_headers
 
             raise Exception(f'Unexpected prediction format: {list(prediction.keys())}')
 
