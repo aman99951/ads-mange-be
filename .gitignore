@@ -2,3 +2,17 @@
 *.pyc
 __pycache__/
 db.sqlite3
+
+# Media uploads (user-generated videos, images, assets)
+media/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.webp
+*.svg

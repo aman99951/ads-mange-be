@@ -1,10 +1,13 @@
 import csv
 import io
+import os
 import threading
+import time
 from django.utils import timezone
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
+from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, get_remaining_quota, log_api_usage
 from .serializers import (
@@ -185,6 +188,40 @@ class AdViewSet(viewsets.ModelViewSet):
             return Response({'error': 'No final asset available'}, status=404)
         return Response({'url': request.build_absolute_uri(ad.final_asset.url)})
 
+    @action(detail=True, methods=['post'], parser_classes=[MultiPartParser, FormParser])
+    def upload_asset(self, request, pk=None):
+        if not getattr(request.user, 'is_staff', False):
+            return Response({'error': 'Admin only'}, status=403)
+        ad = self.get_object()
+        if ad.status != 'approved':
+            return Response({'error': 'Ad must be approved first'}, status=400)
+
+        file = request.FILES.get('file') or request.data.get('file')
+        if not file:
+            return Response({'error': 'file is required'}, status=400)
+
+        ext = os.path.splitext(file.name)[1] or '.mp4'
+        safe_name = f'upload_{ad.id}_{int(time.time())}{ext}'
+
+        language_id = request.data.get('language_id')
+        if language_id:
+            try:
+                language = Language.objects.get(id=language_id)
+            except Language.DoesNotExist:
+                return Response({'error': 'Invalid language_id'}, status=400)
+            asset_obj, _ = AdLanguageAsset.objects.get_or_create(
+                ad=ad, language=language,
+                defaults={'status': 'completed', 'prompt': ''}
+            )
+            asset_obj.asset.save(safe_name, file, save=True)
+            asset_obj.status = 'completed'
+            asset_obj.save()
+            return Response({'message': f'Asset uploaded for {language.name}', 'language_id': language_id})
+        else:
+            ad.final_asset.save(safe_name, file, save=True)
+            ad.save()
+            return Response({'message': 'Final asset uploaded successfully'})
+
     @action(detail=True, methods=['get'])
     def language_assets_list(self, request, pk=None):
         ad = self.get_object()
@@ -336,23 +373,33 @@ class AdViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def push_to_app(self, request, pk=None):
-        if not getattr(request.user, 'is_staff', False):
-            return Response({'error': 'Admin only'}, status=403)
         ad = self.get_object()
+        if not getattr(request.user, 'is_staff', False) and ad.client != request.user:
+            return Response({'error': 'Not authorized'}, status=403)
         if ad.status != 'approved':
             return Response({'error': 'Only approved ads can be pushed'}, status=400)
 
-        app_id = request.data.get('app_id')
-        if not app_id:
-            return Response({'error': 'app_id is required'}, status=400)
+        app_ids = request.data.get('app_ids') or [request.data.get('app_id')]
+        if not app_ids or not any(app_ids):
+            return Response({'error': 'app_ids (list) or app_id is required'}, status=400)
 
-        try:
-            app = DeveloperApp.objects.get(id=app_id, is_active=True)
-        except DeveloperApp.DoesNotExist:
-            return Response({'error': 'Developer app not found'}, status=404)
+        if not isinstance(app_ids, list):
+            app_ids = [app_ids]
 
-        push, created = AdDeveloperPush.objects.get_or_create(ad=ad, app=app)
-        return Response({'message': f'Ad pushed to {app.app_name}', 'push_id': push.id, 'created': created})
+        apps = DeveloperApp.objects.filter(id__in=app_ids, is_active=True)
+        if not apps.exists():
+            return Response({'error': 'No valid developer apps found'}, status=404)
+
+        results = []
+        for app in apps:
+            push, created = AdDeveloperPush.objects.get_or_create(ad=ad, app=app)
+            results.append({
+                'app_id': app.id,
+                'app_name': app.app_name,
+                'push_id': push.id,
+                'created': created,
+            })
+        return Response({'message': f'Ad pushed to {len(results)} app(s)', 'results': results})
 
     @action(detail=True, methods=['get'])
     def pushed_apps(self, request, pk=None):
@@ -364,7 +411,9 @@ class AdViewSet(viewsets.ModelViewSet):
                 'app_id': p.app.id,
                 'app_name': p.app.app_name,
                 'app_type': p.app.app_type,
+                'app_url': p.app.app_url,
                 'company': p.app.developer.company_name,
+                'rating': p.app.rating,
                 'pushed_at': p.pushed_at,
             }
             for p in pushes
@@ -551,9 +600,9 @@ class DeveloperAppViewSet(viewsets.ModelViewSet):
         try:
             from accounts.models import Developer
             dev = Developer.objects.get(user=user, is_active=True)
-        except Developer.DoesNotExist:
-            return DeveloperApp.objects.none()
-        return DeveloperApp.objects.filter(developer=dev)
+            return DeveloperApp.objects.filter(developer=dev)
+        except (Developer.DoesNotExist, ValueError):
+            return DeveloperApp.objects.filter(is_active=True)
 
     def perform_create(self, serializer):
         from accounts.models import Developer
@@ -566,16 +615,7 @@ class DeveloperAdViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = DeveloperAdListSerializer
 
     def get_queryset(self):
-        user = self.request.user
-        try:
-            from accounts.models import Developer
-            dev = Developer.objects.get(user=user, is_active=True)
-        except Developer.DoesNotExist:
-            return Ad.objects.none()
-        return Ad.objects.filter(
-            status='approved',
-            developer_pushes__app__developer=dev
-        ).distinct()
+        return Ad.objects.filter(status='approved').distinct()
 
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())

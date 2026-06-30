@@ -84,6 +84,11 @@ class Ad(models.Model):
         ('expired', 'Expired'),
     ]
 
+    CONTENT_TYPE_CHOICES = [
+        ('video', 'Video'),
+        ('image', 'Image'),
+    ]
+
     client = models.ForeignKey(
         'accounts.Client',
         on_delete=models.CASCADE,
@@ -101,6 +106,10 @@ class Ad(models.Model):
     admin_feedback = models.TextField(blank=True)
     final_asset = models.FileField(upload_to='final_ads/', blank=True, null=True)
     generation_error = models.TextField(blank=True, help_text='Error message from video generation, if any')
+    content_type = models.CharField(max_length=10, choices=CONTENT_TYPE_CHOICES, blank=True, default='video',
+                                    help_text='Whether to generate a video or image ad')
+    content_size = models.CharField(max_length=50, blank=True, default='',
+                                    help_text='Desired dimensions e.g. 1920x1080, 1080x1920')
     scheduled_start = models.DateTimeField(blank=True, null=True, help_text='Campaign start date')
     scheduled_end = models.DateTimeField(blank=True, null=True, help_text='Campaign end date')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -162,6 +171,8 @@ class DeveloperApp(models.Model):
     app_name = models.CharField(max_length=255)
     app_type = models.CharField(max_length=20, choices=APP_TYPES, default='website')
     app_url = models.URLField(blank=True)
+    description = models.TextField(blank=True)
+    rating = models.FloatField(default=0.0)
     api_key = models.CharField(max_length=100, unique=True, editable=False)
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)

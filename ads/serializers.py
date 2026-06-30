@@ -44,6 +44,7 @@ class AdListSerializer(serializers.ModelSerializer):
         model = Ad
         fields = [
             'id', 'title', 'status', 'client_name', 'client_mobile',
+            'content_type', 'content_size',
             'scheduled_start', 'scheduled_end',
             'created_at', 'updated_at'
         ]
@@ -74,7 +75,8 @@ class AdDetailSerializer(serializers.ModelSerializer):
             'target_audiences', 'languages', 'language_assets',
             'target_area_ids', 'target_audience_ids', 'language_ids',
             'asset', 'text_content', 'status', 'admin_feedback', 'final_asset',
-            'generation_error', 'client_name', 'client_mobile',
+            'generation_error', 'content_type', 'content_size',
+            'client_name', 'client_mobile',
             'scheduled_start', 'scheduled_end',
             'created_at', 'updated_at', 'iterations'
         ]
@@ -101,6 +103,8 @@ class AdStatusSerializer(serializers.ModelSerializer):
 
 
 class DeveloperAppSerializer(serializers.ModelSerializer):
+    company = serializers.CharField(source='developer.company_name', read_only=True)
+
     class Meta:
         model = DeveloperApp
         fields = '__all__'
@@ -144,6 +148,7 @@ class DeveloperAdListSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'title', 'description', 'status', 'client_name', 'client_mobile',
             'target_areas', 'target_audiences', 'languages', 'language_assets',
+            'final_asset', 'asset',
             'scheduled_start', 'scheduled_end',
             'created_at', 'updated_at',
         ]

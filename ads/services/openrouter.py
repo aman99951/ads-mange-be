@@ -45,6 +45,21 @@ ENHANCED_PROMPT: <the enhanced prompt>
 NEGATIVE_PROMPT: <comma-separated list of negative elements>"""
 
 
+def _strip_safety_lines(text):
+    """Remove unwanted safety annotations and disclaimers from AI output."""
+    lines = text.split('\n')
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        if re.match(r'^(User\s+)?Safety[:\s].*|^(Note|Disclaimer|Warning)[:\s].*|^\[.*(safe|unsafe|harmful).*\]', stripped, re.IGNORECASE):
+            continue
+        cleaned.append(line)
+    result = '\n'.join(cleaned).strip()
+    # Also strip trailing standalone annotations that might appear at end
+    result = re.sub(r'\n+User\s+Safety\s*:\s*\w+', '', result)
+    return result.strip()
+
+
 def enhance_prompt(user_prompt, media_type='image', width=1024, height=1024):
     """
     Send the user's prompt to OpenRouter and return an enhanced version
@@ -108,16 +123,18 @@ def enhance_prompt(user_prompt, media_type='image', width=1024, height=1024):
 
     # Try to extract ENHANCED_PROMPT and NEGATIVE_PROMPT sections
     enhanced_match = re.search(r'ENHANCED_PROMPT:\s*(.+?)(?=\nNEGATIVE_PROMPT:|$)', content, re.DOTALL)
-    negative_match = re.search(r'NEGATIVE_PROMPT:\s*(.+)', content, re.DOTALL)
+    negative_match = re.search(r'NEGATIVE_PROMPT:\s*(.+?)(?=\n[A-Z][a-z]+\s*:|$)', content, re.DOTALL)
 
     if enhanced_match:
         enhanced = enhanced_match.group(1).strip().strip('"').strip("'").strip()
     else:
-        # Fallback: use the whole response as the enhanced prompt
         enhanced = content.strip().strip('"').strip("'").strip()
 
     if negative_match:
         negative = negative_match.group(1).strip().strip('"').strip("'").strip()
+
+    # Strip unwanted safety/disclaimer lines from enhanced prompt
+    enhanced = _strip_safety_lines(enhanced)
 
     # If we got no negative prompt from the AI, provide a sensible default
     if not negative:
