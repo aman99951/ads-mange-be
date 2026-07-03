@@ -9,17 +9,18 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
-from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, get_remaining_quota, log_api_usage
+from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, GeneratedMedia, VideoFeedback, get_remaining_quota, log_api_usage
 from .serializers import (
     TargetAreaSerializer, TargetAudienceSerializer, LanguageSerializer,
     AdListSerializer, AdDetailSerializer, AdStatusSerializer,
     AdIterationSerializer, AdLanguageAssetSerializer,
     DeveloperAppSerializer, AdDeveloperPushSerializer, PublicAdSerializer,
-    DeveloperAdListSerializer
+    DeveloperAdListSerializer, GeneratedMediaSerializer, VideoFeedbackSerializer
 )
 from .services.veo import generate_video_from_text
 from .services.imagen import generate_image_from_text
 from .services.nano_banana import generate_nano_banana_image
+from .services.gemini_image import generate_gemini_image
 from .services.openrouter import enhance_prompt as enhance_prompt_service
 from .services.google_models import get_model_info, IMAGE_MODELS, VIDEO_MODELS
 from .services.google_quota import QuotaExceededError
@@ -42,6 +43,15 @@ def available_models(request):
         'image_models': IMAGE_MODELS,
         'video_models': VIDEO_MODELS,
     })
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def recent_media(request):
+    """Return the most recent generated media for the current user."""
+    media = GeneratedMedia.objects.filter(user=request.user)[:20]
+    serializer = GeneratedMediaSerializer(media, many=True, context={'request': request})
+    return Response(serializer.data)
 
 
 @api_view(['GET'])
@@ -162,6 +172,96 @@ class AdViewSet(viewsets.ModelViewSet):
             serializer.save(status='rejected')
             return Response(serializer.data)
         return Response(serializer.errors, status=400)
+
+    @action(detail=True, methods=['post'])
+    def request_revision(self, request, pk=None):
+        ad = self.get_object()
+        if ad.client != request.user:
+            return Response({'error': 'Not your ad'}, status=403)
+        if ad.status == 'draft':
+            return Response({'error': 'Submit the ad for approval first before requesting a revision'}, status=400)
+
+        feedback_text = request.data.get('feedback', '').strip()
+        if not feedback_text:
+            return Response({'error': 'Feedback text is required'}, status=400)
+
+        AdIteration.objects.create(
+            ad=ad,
+            feedback=feedback_text,
+            created_by='client'
+        )
+
+        ad.status = 'revision_requested'
+        ad.save()
+
+        return Response({'status': 'revision_requested'})
+
+    @action(detail=True, methods=['post'])
+    def send_back_to_client(self, request, pk=None):
+        ad = self.get_object()
+        if not getattr(request.user, 'is_staff', False):
+            return Response({'error': 'Only managers can send back to client'}, status=403)
+        if ad.status not in ('approved', 'expired', 'revision_requested'):
+            return Response({'error': 'Ad must be approved, expired, or revision_requested to send back to client'}, status=400)
+
+        feedback_text = request.data.get('feedback', '').strip()
+        if not feedback_text:
+            return Response({'error': 'Feedback text is required'}, status=400)
+
+        AdIteration.objects.create(
+            ad=ad,
+            feedback=feedback_text,
+            created_by='admin'
+        )
+
+        ad.status = 'revision_requested'
+        ad.save()
+
+        return Response({'status': 'revision_requested'})
+
+    @action(detail=True, methods=['post'])
+    def save_generated_assets(self, request, pk=None):
+        """Save AI-generated assets from the studio back to this ad."""
+        if not getattr(request.user, 'is_staff', False):
+            return Response({'error': 'Admin only'}, status=403)
+        ad = self.get_object()
+
+        asset_ids = request.data.get('asset_ids', [])
+        if not asset_ids:
+            return Response({'error': 'asset_ids is required (list of GeneratedMedia IDs)'}, status=400)
+
+        media_objects = GeneratedMedia.objects.filter(id__in=asset_ids)
+        if not media_objects.exists():
+            return Response({'error': 'No valid assets found'}, status=404)
+
+        saved_count = 0
+        # Pick the first video as final_asset
+        first_video = media_objects.filter(media_type='video').first()
+        if first_video:
+            from django.core.files.storage import default_storage
+            file_path = first_video.file.name if hasattr(first_video.file, 'name') else str(first_video.file)
+            if default_storage.exists(file_path):
+                from django.core.files import File
+                f = default_storage.open(file_path)
+                ad.final_asset.save(f'studio_{first_video.id}_{file_path.split("/")[-1]}', File(f), save=True)
+                saved_count += 1
+
+        # Log an iteration
+        AdIteration.objects.create(
+            ad=ad,
+            feedback='Manager updated the ad video from Creative Studio.',
+            created_by='admin'
+        )
+
+        # Set status to pending_approval so client can review
+        ad.status = 'pending_approval'
+        ad.save()
+
+        return Response({
+            'status': 'pending_approval',
+            'message': f'Saved {saved_count} asset(s) to campaign. Client will be notified.',
+            'saved_count': saved_count,
+        })
 
     @action(detail=True, methods=['post'])
     def add_iteration(self, request, pk=None):
@@ -432,7 +532,7 @@ class AdViewSet(viewsets.ModelViewSet):
             return Response({'error': 'prompt is required'}, status=400)
 
         aspect_ratio = request.data.get('aspect_ratio', '1:1')
-        model_id = request.data.get('model', 'imagen-3.0-generate-001')
+        model_id = request.data.get('model', 'gemini-3.1-flash-image')
 
         # Validate model
         model_info = get_model_info(model_id)
@@ -444,6 +544,8 @@ class AdViewSet(viewsets.ModelViewSet):
             api_type = model_info.get('api_type', 'predictLongRunning')
             if api_type == 'interactions':
                 image_file, resp_headers = generate_nano_banana_image(prompt, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key)
+            elif api_type == 'generateContent':
+                image_file, resp_headers = generate_gemini_image(prompt, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key)
             else:
                 image_file, resp_headers = generate_image_from_text(prompt, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key)
 
@@ -454,6 +556,15 @@ class AdViewSet(viewsets.ModelViewSet):
             path = default_storage.save(f'creative_images/{image_file.name}', ContentFile(image_file.read()))
             url = request.build_absolute_uri(default_storage.url(path))
 
+            gm = GeneratedMedia.objects.create(
+                user=request.user,
+                media_type='image',
+                file=path,
+                prompt=prompt,
+                model_used=model_id,
+                aspect_ratio=aspect_ratio,
+            )
+
             return Response({
                 'url': url,
                 'path': path,
@@ -461,6 +572,7 @@ class AdViewSet(viewsets.ModelViewSet):
                 'aspect_ratio': aspect_ratio,
                 'model_used': model_id,
                 'google_api_quota': get_remaining_quota(),
+                'generated_media_id': gm.id,
             })
         except QuotaExceededError as e:
             quota = get_remaining_quota()
@@ -482,9 +594,11 @@ class AdViewSet(viewsets.ModelViewSet):
         if not prompt:
             return Response({'error': 'prompt is required'}, status=400)
 
-        duration = request.data.get('duration_seconds', 8)
+        duration = int(request.data.get('duration_seconds', 8))
+        duration = min((v for v in (4, 6, 8) if v >= duration), default=8)
+        target_duration = int(request.data.get('target_duration_seconds', 0)) or None
         aspect_ratio = request.data.get('aspect_ratio', '16:9')
-        model_id = request.data.get('model', 'veo-3.0-generate-001')
+        model_id = request.data.get('model', 'veo-3.1-generate-preview')
 
         # Validate model
         model_info = get_model_info(model_id)
@@ -493,7 +607,7 @@ class AdViewSet(viewsets.ModelViewSet):
 
         try:
             api_key = _get_manager_api_key(request.user)
-            video_file, resp_headers = generate_video_from_text(prompt, duration_seconds=duration, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key)
+            video_file, resp_headers = generate_video_from_text(prompt, duration_seconds=duration, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key, target_duration_seconds=target_duration)
 
             log_api_usage(model_id, success=True, response_headers=resp_headers)
 
@@ -502,14 +616,26 @@ class AdViewSet(viewsets.ModelViewSet):
             path = default_storage.save(f'creative_videos/{video_file.name}', ContentFile(video_file.read()))
             url = request.build_absolute_uri(default_storage.url(path))
 
+            gm = GeneratedMedia.objects.create(
+                user=request.user,
+                media_type='video',
+                file=path,
+                prompt=prompt,
+                model_used=model_id,
+                duration_seconds=target_duration or duration,
+                aspect_ratio=aspect_ratio,
+            )
+
             return Response({
                 'url': url,
                 'path': path,
                 'prompt': prompt,
                 'duration_seconds': duration,
+                'target_duration_seconds': target_duration,
                 'aspect_ratio': aspect_ratio,
                 'model_used': model_id,
                 'google_api_quota': get_remaining_quota(),
+                'generated_media_id': gm.id,
             })
         except QuotaExceededError as e:
             quota = get_remaining_quota()
@@ -731,3 +857,26 @@ def public_ads(request):
         'total': ads.count(),
         'ads': serializer.data,
     })
+
+
+class VideoFeedbackViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+    serializer_class = VideoFeedbackSerializer
+
+    def get_queryset(self):
+        return VideoFeedback.objects.filter(ad_id=self.kwargs.get('ad_pk')).order_by('created_at')
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        name = getattr(user, 'name', '') or getattr(user, 'username', '')
+        role = 'admin' if getattr(user, 'is_staff', False) else 'client'
+        kwargs = {'user_name': name, 'created_by': role, 'ad_id': self.kwargs.get('ad_pk')}
+        lang_asset_id = self.request.data.get('language_asset_id')
+        if lang_asset_id:
+            try:
+                from .models import AdLanguageAsset
+                asset = AdLanguageAsset.objects.get(id=lang_asset_id, ad_id=self.kwargs.get('ad_pk'))
+                kwargs['language_asset'] = asset
+            except AdLanguageAsset.DoesNotExist:
+                pass
+        serializer.save(**kwargs)

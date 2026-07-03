@@ -12,7 +12,7 @@ from django.core.files.base import ContentFile
 from .google_quota import QuotaExceededError, mark_quota_exhausted, update_ratelimit_from_headers
 
 
-NANO_BANANA_API_KEY = os.environ.get('VEO_API_KEY') or getattr(settings, 'VEO_API_KEY', '')
+NANO_BANANA_API_KEY = os.environ.get('GEMINI_STUDIO_KEY') or getattr(settings, 'GEMINI_STUDIO_KEY', '')
 NANO_BANANA_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 
 # Map aspect ratios
@@ -72,7 +72,7 @@ def generate_nano_banana_image(prompt, aspect_ratio='1:1', model_name=None, api_
         },
     }
 
-    resp = requests.post(url, headers=headers, json=body, timeout=120)
+    resp = requests.post(url, headers=headers, json=body, timeout=180)
     resp_headers = dict(resp.headers)
     if resp.status_code == 429:
         update_ratelimit_from_headers(resp_headers)

@@ -1,6 +1,7 @@
 from django.db import models
 from django.utils import timezone
 from django.conf import settings
+from django.contrib.auth import get_user_model
 import uuid
 from .services.google_quota import (
     update_ratelimit_from_headers,
@@ -81,6 +82,7 @@ class Ad(models.Model):
         ('pending_approval', 'Pending Approval'),
         ('approved', 'Approved'),
         ('rejected', 'Rejected'),
+        ('revision_requested', 'Revision Requested'),
         ('expired', 'Expired'),
     ]
 
@@ -198,3 +200,52 @@ class AdDeveloperPush(models.Model):
 
     def __str__(self):
         return f'{self.ad.title} → {self.app.app_name}'
+
+
+class GeneratedMedia(models.Model):
+    MEDIA_TYPES = [
+        ('image', 'Image'),
+        ('video', 'Video'),
+    ]
+
+    user = models.ForeignKey(
+        get_user_model(), on_delete=models.CASCADE, related_name='generated_media'
+    )
+    media_type = models.CharField(max_length=10, choices=MEDIA_TYPES)
+    file = models.FileField(upload_to='generated_media/')
+    prompt = models.TextField(blank=True)
+    model_used = models.CharField(max_length=100, blank=True)
+    duration_seconds = models.IntegerField(null=True, blank=True)
+    aspect_ratio = models.CharField(max_length=10, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Generated Media'
+        verbose_name_plural = 'Generated Media'
+
+    def __str__(self):
+        return f'{self.media_type} - {self.prompt[:40]}'
+
+
+class VideoFeedback(models.Model):
+    ad = models.ForeignKey(Ad, on_delete=models.CASCADE, related_name='video_feedback')
+    language_asset = models.ForeignKey(AdLanguageAsset, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='video_feedback',
+        help_text='Specific language asset this feedback refers to, if any')
+    user_name = models.CharField(max_length=255, blank=True,
+        help_text='Display name of the person who left feedback')
+    created_by = models.CharField(max_length=20, choices=[
+        ('client', 'Client'),
+        ('admin', 'Admin'),
+    ], default='client')
+    comment = models.TextField()
+    timestamp_seconds = models.FloatField(null=True, blank=True,
+        help_text='Video timestamp in seconds for annotation')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f'Feedback on {self.ad.title} at {self.timestamp_seconds}s'

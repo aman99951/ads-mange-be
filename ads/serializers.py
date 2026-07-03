@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush
+from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, GeneratedMedia, VideoFeedback
 
 
 class TargetAreaSerializer(serializers.ModelSerializer):
@@ -36,6 +36,15 @@ class AdIterationSerializer(serializers.ModelSerializer):
         read_only_fields = ['created_at', 'ad', 'created_by']
 
 
+class VideoFeedbackSerializer(serializers.ModelSerializer):
+    language_name = serializers.CharField(source='language_asset.language.name', read_only=True, default='')
+
+    class Meta:
+        model = VideoFeedback
+        fields = ['id', 'ad', 'language_asset', 'language_name', 'user_name', 'created_by', 'comment', 'timestamp_seconds', 'created_at']
+        read_only_fields = ['ad', 'language_name', 'user_name', 'created_by', 'created_at']
+
+
 class AdListSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(source='client.name', read_only=True)
     client_mobile = serializers.CharField(source='client.mobile', read_only=True)
@@ -65,6 +74,7 @@ class AdDetailSerializer(serializers.ModelSerializer):
         child=serializers.IntegerField(), write_only=True, required=False
     )
     iterations = AdIterationSerializer(many=True, read_only=True)
+    video_feedback = VideoFeedbackSerializer(many=True, read_only=True)
     client_name = serializers.CharField(source='client.name', read_only=True)
     client_mobile = serializers.CharField(source='client.mobile', read_only=True)
 
@@ -78,9 +88,9 @@ class AdDetailSerializer(serializers.ModelSerializer):
             'generation_error', 'content_type', 'content_size',
             'client_name', 'client_mobile',
             'scheduled_start', 'scheduled_end',
-            'created_at', 'updated_at', 'iterations'
+            'created_at', 'updated_at', 'iterations', 'video_feedback'
         ]
-        read_only_fields = ['client', 'status', 'admin_feedback', 'final_asset', 'generation_error', 'created_at', 'updated_at', 'iterations']
+        read_only_fields = ['client', 'status', 'admin_feedback', 'final_asset', 'generation_error', 'created_at', 'updated_at', 'iterations', 'video_feedback']
 
     def create(self, validated_data):
         target_area_ids = validated_data.pop('target_area_ids', [])
@@ -133,6 +143,13 @@ class PublicAdSerializer(serializers.ModelSerializer):
             'target_audiences', 'languages', 'language_assets',
             'created_at',
         ]
+
+
+class GeneratedMediaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = GeneratedMedia
+        fields = '__all__'
+        read_only_fields = ['user', 'created_at']
 
 
 class DeveloperAdListSerializer(serializers.ModelSerializer):

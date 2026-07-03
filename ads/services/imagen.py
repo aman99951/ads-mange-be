@@ -6,7 +6,7 @@ from django.core.files.base import ContentFile
 from .google_quota import QuotaExceededError, mark_quota_exhausted, update_ratelimit_from_headers
 
 
-IMAGEN_API_KEY = os.environ.get('VEO_API_KEY') or getattr(settings, 'VEO_API_KEY', '')
+IMAGEN_API_KEY = os.environ.get('GEMINI_STUDIO_KEY') or getattr(settings, 'GEMINI_STUDIO_KEY', '')
 IMAGEN_BASE_URL = os.environ.get('VEO_BASE_URL') or 'https://generativelanguage.googleapis.com/v1beta'
 
 

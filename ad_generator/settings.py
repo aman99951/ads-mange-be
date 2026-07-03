@@ -102,7 +102,7 @@ CORS_ALLOW_ALL_ORIGINS = DEBUG
 CORS_ALLOWED_ORIGINS = os.environ.get('CORS_ALLOWED_ORIGINS', '').split(',') if not DEBUG and os.environ.get('CORS_ALLOWED_ORIGINS') else []
 CORS_ALLOW_HEADERS = ['*']
 
-VEO_API_KEY = os.environ.get('VEO_API_KEY', '')
+GEMINI_STUDIO_KEY = os.environ.get('GEMINI_STUDIO_KEY', '')
 VEO_BASE_URL = os.environ.get('VEO_BASE_URL', 'https://generativelanguage.googleapis.com/v1beta')
 
 GOOGLE_CLOUD_PROJECT_ID = os.environ.get('GOOGLE_CLOUD_PROJECT_ID', '')
