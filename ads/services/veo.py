@@ -103,7 +103,7 @@ def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', po
     if not can_extend and target > 8:
         target = 8
 
-    clip_duration = min((v for v in valid_durations if v <= target), default=8)
+    clip_duration = max((v for v in valid_durations if v <= target), default=8)
     video_uri, resp_headers = _start_generation(
         prompt, clip_duration, aspect_ratio, effective_key, model
     )
@@ -111,7 +111,7 @@ def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', po
 
     while can_extend and total_generated < target:
         remaining = target - total_generated
-        next_duration = min((v for v in valid_durations if v <= remaining), default=min(valid_durations))
+        next_duration = max((v for v in valid_durations if v <= remaining), default=min(valid_durations))
         video_uri, _ = _start_generation(
             prompt, next_duration, aspect_ratio, effective_key, model,
             previous_video_uri=video_uri

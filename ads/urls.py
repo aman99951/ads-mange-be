@@ -23,4 +23,7 @@ urlpatterns = [
     path('models/', views.available_models, name='available-models'),
     path('usage-stats/', views.api_usage_stats, name='api-usage-stats'),
     path('recent-media/', views.recent_media, name='recent-media'),
+    path('creative-sessions/', views.creative_sessions_list, name='creative-sessions-list'),
+    path('creative-sessions/<int:pk>/', views.creative_session_detail, name='creative-session-detail'),
+    path('creative-sessions/<int:pk>/add-event/', views.creative_session_add_event, name='creative-session-add-event'),
 ]

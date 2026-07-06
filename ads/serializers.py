@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, GeneratedMedia, VideoFeedback
+from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, GeneratedMedia, VideoFeedback, CreativeSession, CreativeSessionEvent
 
 
 class TargetAreaSerializer(serializers.ModelSerializer):
@@ -169,3 +169,62 @@ class DeveloperAdListSerializer(serializers.ModelSerializer):
             'scheduled_start', 'scheduled_end',
             'created_at', 'updated_at',
         ]
+
+
+class CreativeSessionListSerializer(serializers.ModelSerializer):
+    asset_count = serializers.SerializerMethodField()
+    preview_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CreativeSession
+        fields = ['id', 'title', 'media_type', 'created_at', 'updated_at', 'asset_count', 'preview_url']
+
+    def get_asset_count(self, obj):
+        return obj.events.filter(event_type='generate').count()
+
+    def get_preview_url(self, obj):
+        last_gen = obj.events.filter(event_type='generate', generated_media__isnull=False).last()
+        if last_gen and last_gen.generated_media:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(last_gen.generated_media.file.url)
+        return None
+
+
+class CreativeSessionEventSerializer(serializers.ModelSerializer):
+    file = serializers.SerializerMethodField()
+    model_used = serializers.SerializerMethodField()
+    duration_seconds = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CreativeSessionEvent
+        fields = ['id', 'event_type', 'prompt', 'settings', 'file', 'model_used', 'duration_seconds', 'created_at']
+
+    def get_file(self, obj):
+        if obj.generated_media and obj.generated_media.file:
+            request = self.context.get('request')
+            if request:
+                return request.build_absolute_uri(obj.generated_media.file.url)
+            return obj.generated_media.file.url
+        return None
+
+    def get_model_used(self, obj):
+        return obj.generated_media.model_used if obj.generated_media else None
+
+    def get_duration_seconds(self, obj):
+        return obj.generated_media.duration_seconds if obj.generated_media else None
+
+
+class CreativeSessionDetailSerializer(serializers.ModelSerializer):
+    events = CreativeSessionEventSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = CreativeSession
+        fields = '__all__'
+        read_only_fields = ['user', 'created_at', 'updated_at']
+
+
+class CreativeSessionCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CreativeSession
+        fields = ['id', 'title', 'media_type', 'settings', 'current_prompt']

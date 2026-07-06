@@ -228,6 +228,64 @@ class GeneratedMedia(models.Model):
         return f'{self.media_type} - {self.prompt[:40]}'
 
 
+class CreativeSession(models.Model):
+    MEDIA_TYPES = [
+        ('image', 'Image'),
+        ('video', 'Video'),
+    ]
+
+    user = models.ForeignKey(
+        get_user_model(), on_delete=models.CASCADE, related_name='creative_sessions'
+    )
+    title = models.CharField(max_length=255, blank=True,
+        help_text='Auto-generated from first prompt')
+    media_type = models.CharField(max_length=10, choices=MEDIA_TYPES, default='image')
+    settings = models.JSONField(default=dict, blank=True,
+        help_text='Session settings: width, height, duration, model, style, etc.')
+    current_prompt = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+        verbose_name = 'Creative Session'
+        verbose_name_plural = 'Creative Sessions'
+
+    def __str__(self):
+        return self.title or f'Session {self.id}'
+
+
+class CreativeSessionEvent(models.Model):
+    EVENT_TYPES = [
+        ('generate', 'Generation'),
+        ('edit_prompt', 'Prompt Edit'),
+        ('edit_settings', 'Settings Change'),
+        ('delete_asset', 'Asset Deletion'),
+    ]
+
+    session = models.ForeignKey(
+        CreativeSession, on_delete=models.CASCADE, related_name='events'
+    )
+    event_type = models.CharField(max_length=20, choices=EVENT_TYPES)
+    prompt = models.TextField(blank=True,
+        help_text='Prompt at the time of event')
+    settings = models.JSONField(default=dict, blank=True,
+        help_text='Settings snapshot at time of event')
+    generated_media = models.ForeignKey(
+        GeneratedMedia, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='session_events'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+        verbose_name = 'Session Event'
+        verbose_name_plural = 'Session Events'
+
+    def __str__(self):
+        return f'{self.event_type} at {self.created_at}'
+
+
 class VideoFeedback(models.Model):
     ad = models.ForeignKey(Ad, on_delete=models.CASCADE, related_name='video_feedback')
     language_asset = models.ForeignKey(AdLanguageAsset, on_delete=models.SET_NULL,

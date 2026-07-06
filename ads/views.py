@@ -9,13 +9,14 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
-from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, GeneratedMedia, VideoFeedback, get_remaining_quota, log_api_usage
+from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, GeneratedMedia, VideoFeedback, CreativeSession, CreativeSessionEvent, get_remaining_quota, log_api_usage
 from .serializers import (
     TargetAreaSerializer, TargetAudienceSerializer, LanguageSerializer,
     AdListSerializer, AdDetailSerializer, AdStatusSerializer,
     AdIterationSerializer, AdLanguageAssetSerializer,
     DeveloperAppSerializer, AdDeveloperPushSerializer, PublicAdSerializer,
-    DeveloperAdListSerializer, GeneratedMediaSerializer, VideoFeedbackSerializer
+    DeveloperAdListSerializer, GeneratedMediaSerializer, VideoFeedbackSerializer,
+    CreativeSessionListSerializer, CreativeSessionDetailSerializer, CreativeSessionCreateSerializer, CreativeSessionEventSerializer
 )
 from .services.veo import generate_video_from_text
 from .services.imagen import generate_image_from_text
@@ -880,3 +881,80 @@ class VideoFeedbackViewSet(viewsets.ModelViewSet):
             except AdLanguageAsset.DoesNotExist:
                 pass
         serializer.save(**kwargs)
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def creative_sessions_list(request):
+    if request.method == 'GET':
+        sessions = CreativeSession.objects.filter(user=request.user)
+        serializer = CreativeSessionListSerializer(sessions, many=True, context={'request': request})
+        return Response(serializer.data)
+    elif request.method == 'POST':
+        serializer = CreativeSessionCreateSerializer(data=request.data)
+        if serializer.is_valid():
+            session = serializer.save(user=request.user)
+            detail_serializer = CreativeSessionDetailSerializer(session, context={'request': request})
+            return Response(detail_serializer.data, status=201)
+        return Response(serializer.errors, status=400)
+
+
+@api_view(['GET', 'PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def creative_session_detail(request, pk):
+    try:
+        session = CreativeSession.objects.get(pk=pk, user=request.user)
+    except CreativeSession.DoesNotExist:
+        return Response({'error': 'Session not found'}, status=404)
+
+    if request.method == 'GET':
+        serializer = CreativeSessionDetailSerializer(session, context={'request': request})
+        return Response(serializer.data)
+    elif request.method == 'PATCH':
+        serializer = CreativeSessionCreateSerializer(session, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            detail_serializer = CreativeSessionDetailSerializer(session, context={'request': request})
+            return Response(detail_serializer.data)
+        return Response(serializer.errors, status=400)
+    elif request.method == 'DELETE':
+        session.delete()
+        return Response(status=204)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def creative_session_add_event(request, pk):
+    try:
+        session = CreativeSession.objects.get(pk=pk, user=request.user)
+    except CreativeSession.DoesNotExist:
+        return Response({'error': 'Session not found'}, status=404)
+
+    event_type = request.data.get('event_type')
+    if event_type not in dict(CreativeSessionEvent.EVENT_TYPES):
+        return Response({'error': f'Invalid event type. Must be one of: {", ".join(dict(CreativeSessionEvent.EVENT_TYPES).keys())}'}, status=400)
+
+    generated_media_id = request.data.get('generated_media_id')
+    generated_media = None
+    if generated_media_id:
+        try:
+            generated_media = GeneratedMedia.objects.get(id=generated_media_id, user=request.user)
+        except GeneratedMedia.DoesNotExist:
+            return Response({'error': 'Generated media not found'}, status=404)
+
+    event = CreativeSessionEvent.objects.create(
+        session=session,
+        event_type=event_type,
+        prompt=request.data.get('prompt', ''),
+        settings=request.data.get('settings', {}),
+        generated_media=generated_media,
+    )
+
+    # Update session title from first generate event
+    if event_type == 'generate' and not session.title:
+        title = (request.data.get('prompt', '') or '')[:80]
+        session.title = title or f'Session {session.id}'
+        session.save(update_fields=['title'])
+
+    serializer = CreativeSessionEventSerializer(event, context={'request': request})
+    return Response(serializer.data, status=201)

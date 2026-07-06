@@ -5,6 +5,16 @@ Centralized list of available models, their API endpoints, and credit costs.
 
 IMAGE_MODELS = [
     {
+        'id': 'gemini-3.1-flash-lite-image',
+        'name': 'Gemini 3.1 Flash Lite Image',
+        'description': 'Fastest lightweight option — 1 credit',
+        'credit_cost': 1,
+        'media_type': 'image',
+        'is_premium': False,
+        'provider': 'google',
+        'api_type': 'generateContent',
+    },
+    {
         'id': 'gemini-2.5-flash-image',
         'name': 'Gemini 2.5 Flash Image',
         'description': 'Fast image generation via Gemini API — 2 credits',
@@ -25,16 +35,6 @@ IMAGE_MODELS = [
         'api_type': 'generateContent',
     },
     {
-        'id': 'gemini-3.1-flash-lite-image',
-        'name': 'Gemini 3.1 Flash Lite Image',
-        'description': 'Fastest lightweight option — 1 credit',
-        'credit_cost': 1,
-        'media_type': 'image',
-        'is_premium': False,
-        'provider': 'google',
-        'api_type': 'generateContent',
-    },
-    {
         'id': 'gemini-3-pro-image',
         'name': 'Gemini 3 Pro Image',
         'description': 'Professional quality with advanced reasoning — 5 credits',
@@ -48,12 +48,12 @@ IMAGE_MODELS = [
 
 VIDEO_MODELS = [
     {
-        'id': 'veo-3.1-generate-preview',
-        'name': 'Veo 3.1',
-        'description': 'Latest cinematic video generation',
-        'credit_cost': 8,
+        'id': 'veo-3.1-lite-generate-preview',
+        'name': 'Veo 3.1 Lite',
+        'description': 'Fastest, lightweight option',
+        'credit_cost': 4,
         'media_type': 'video',
-        'is_premium': True,
+        'is_premium': False,
         'provider': 'google',
         'api_type': 'predictLongRunning',
     },
@@ -68,12 +68,12 @@ VIDEO_MODELS = [
         'api_type': 'predictLongRunning',
     },
     {
-        'id': 'veo-3.1-lite-generate-preview',
-        'name': 'Veo 3.1 Lite',
-        'description': 'Fastest, lightweight option',
-        'credit_cost': 4,
+        'id': 'veo-3.1-generate-preview',
+        'name': 'Veo 3.1',
+        'description': 'Latest cinematic video generation',
+        'credit_cost': 8,
         'media_type': 'video',
-        'is_premium': False,
+        'is_premium': True,
         'provider': 'google',
         'api_type': 'predictLongRunning',
     },
