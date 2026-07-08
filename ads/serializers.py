@@ -59,6 +59,29 @@ class AdListSerializer(serializers.ModelSerializer):
         ]
 
 
+class RevisionRequestSerializer(serializers.ModelSerializer):
+    client_name = serializers.CharField(source='client.name', read_only=True)
+    latest_feedback = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Ad
+        fields = [
+            'id', 'title', 'status', 'client_name',
+            'created_at', 'updated_at', 'latest_feedback'
+        ]
+
+    def get_latest_feedback(self, obj):
+        iteration = obj.iterations.order_by('-created_at').first()
+        if iteration:
+            return {
+                'id': iteration.id,
+                'feedback': iteration.feedback,
+                'created_by': iteration.created_by,
+                'created_at': iteration.created_at,
+            }
+        return None
+
+
 class AdDetailSerializer(serializers.ModelSerializer):
     target_areas = TargetAreaSerializer(many=True, read_only=True)
     target_audiences = TargetAudienceSerializer(many=True, read_only=True)
@@ -206,6 +229,8 @@ class CreativeSessionEventSerializer(serializers.ModelSerializer):
             if request:
                 return request.build_absolute_uri(obj.generated_media.file.url)
             return obj.generated_media.file.url
+        if obj.file:
+            return obj.file
         return None
 
     def get_model_used(self, obj):

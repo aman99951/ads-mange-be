@@ -35,7 +35,7 @@ def _poll_operation(operation_name, effective_key, poll_interval=5):
         time.sleep(poll_interval)
 
 
-def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, model, previous_video_uri=None, poll_interval=5):
+def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, model, poll_interval=5, input_image_base64=None, input_image_mime='image/png'):
     url = f'{VEO_BASE_URL}/models/{model}:predictLongRunning'
     headers = {
         'X-Goog-Api-Key': effective_key,
@@ -43,8 +43,11 @@ def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, mod
     }
 
     instance = {'prompt': prompt}
-    if previous_video_uri:
-        instance['video'] = {'uri': previous_video_uri}
+    if input_image_base64:
+        instance['image'] = {
+            'bytesBase64Encoded': input_image_base64,
+            'mimeType': input_image_mime,
+        }
 
     body = {
         'instances': [instance],
@@ -86,10 +89,21 @@ def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, mod
         raise Exception(f'Veo API error {resp.status_code}: {resp.text}')
 
 
-EXTENSION_BLACKLIST = {'veo-3.1-lite-generate-preview'}
+def _download_to_temp(uri, api_key, temp_dir, index):
+    """Download a video URI to a temp file and return the path."""
+    import os
+    headers = {'X-Goog-Api-Key': api_key}
+    resp = requests.get(uri, headers=headers, stream=True, timeout=120)
+    if resp.status_code != 200:
+        raise Exception(f'Failed to download video: {resp.status_code}')
+    ext = 'mp4' if 'mp4' in resp.headers.get('Content-Type', '') else 'webm'
+    path = os.path.join(temp_dir, f'clip_{index}.{ext}')
+    with open(path, 'wb') as f:
+        f.write(resp.content)
+    return path
 
 
-def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', poll_interval=5, model_name=None, api_key=None, target_duration_seconds=None):
+def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', poll_interval=5, model_name=None, api_key=None, target_duration_seconds=None, input_image_base64=None, input_image_mime='image/png'):
     model = model_name or 'veo-3.1-generate-preview'
     effective_key = api_key or GEMINI_STUDIO_KEY
 
@@ -99,26 +113,49 @@ def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', po
     target = target_duration_seconds or duration_seconds
     valid_durations = sorted([4, 6, 8], reverse=True)
 
-    can_extend = model not in EXTENSION_BLACKLIST
-    if not can_extend and target > 8:
-        target = 8
+    # Generate as many independent clips as needed to reach the target duration
+    # (Gemini API does NOT support video extension via previous_video_uri)
+    remaining = target
+    clip_durations = []
+    while remaining > 0:
+        dur = max((v for v in valid_durations if v <= remaining), default=min(valid_durations))
+        clip_durations.append(dur)
+        remaining -= dur
 
-    clip_duration = max((v for v in valid_durations if v <= target), default=8)
-    video_uri, resp_headers = _start_generation(
-        prompt, clip_duration, aspect_ratio, effective_key, model
-    )
-    total_generated = clip_duration
+    video_uris = []
+    resp_headers = {}
+    for dur in clip_durations:
+        uri, headers = _start_generation(prompt, dur, aspect_ratio, effective_key, model, poll_interval, input_image_base64, input_image_mime)
+        video_uris.append(uri)
+        resp_headers = headers
 
-    while can_extend and total_generated < target:
-        remaining = target - total_generated
-        next_duration = max((v for v in valid_durations if v <= remaining), default=min(valid_durations))
-        video_uri, _ = _start_generation(
-            prompt, next_duration, aspect_ratio, effective_key, model,
-            previous_video_uri=video_uri
+    if len(video_uris) == 1:
+        return _download_from_uri(video_uris[0], prompt, effective_key), resp_headers
+
+    # Multiple clips — concatenate with FFmpeg
+    import tempfile, subprocess, shutil, os
+    temp_dir = tempfile.mkdtemp()
+    try:
+        clip_paths = [_download_to_temp(u, effective_key, temp_dir, i) for i, u in enumerate(video_uris)]
+        concat_file = os.path.join(temp_dir, 'concat.txt')
+        with open(concat_file, 'w') as f:
+            for p in clip_paths:
+                f.write(f"file '{p.replace(chr(39), chr(92) + chr(39))}'\n")
+
+        output_path = os.path.join(temp_dir, 'output.mp4')
+        subprocess.run(
+            ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_file, '-c', 'copy', '-y', output_path],
+            capture_output=True, text=True, timeout=120, check=True,
         )
-        total_generated += next_duration
 
-    return _download_from_uri(video_uri, prompt, effective_key), resp_headers
+        content_type = 'video/mp4'
+        raw = open(output_path, 'rb').read()
+        from django.core.files.base import ContentFile
+        return ContentFile(raw, name=_filename(prompt, content_type)), resp_headers
+    except subprocess.CalledProcessError as e:
+        raise Exception(f'FFmpeg concat failed: {e.stderr}')
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def _download_from_gcs(gcs_uri, prompt):

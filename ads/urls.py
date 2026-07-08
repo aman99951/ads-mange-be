@@ -26,4 +26,5 @@ urlpatterns = [
     path('creative-sessions/', views.creative_sessions_list, name='creative-sessions-list'),
     path('creative-sessions/<int:pk>/', views.creative_session_detail, name='creative-session-detail'),
     path('creative-sessions/<int:pk>/add-event/', views.creative_session_add_event, name='creative-session-add-event'),
+    path('upload-media/', views.upload_media, name='upload-media'),
 ]

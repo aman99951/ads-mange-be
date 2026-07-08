@@ -261,6 +261,7 @@ class CreativeSessionEvent(models.Model):
         ('edit_prompt', 'Prompt Edit'),
         ('edit_settings', 'Settings Change'),
         ('delete_asset', 'Asset Deletion'),
+        ('merge', 'Video Merge'),
     ]
 
     session = models.ForeignKey(
@@ -275,6 +276,8 @@ class CreativeSessionEvent(models.Model):
         GeneratedMedia, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='session_events'
     )
+    file = models.URLField(max_length=500, blank=True, default='',
+        help_text='Direct file URL for events without GeneratedMedia (e.g. merged videos)')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

@@ -16,7 +16,8 @@ from .serializers import (
     AdIterationSerializer, AdLanguageAssetSerializer,
     DeveloperAppSerializer, AdDeveloperPushSerializer, PublicAdSerializer,
     DeveloperAdListSerializer, GeneratedMediaSerializer, VideoFeedbackSerializer,
-    CreativeSessionListSerializer, CreativeSessionDetailSerializer, CreativeSessionCreateSerializer, CreativeSessionEventSerializer
+    CreativeSessionListSerializer, CreativeSessionDetailSerializer, CreativeSessionCreateSerializer, CreativeSessionEventSerializer,
+    RevisionRequestSerializer
 )
 from .services.veo import generate_video_from_text
 from .services.imagen import generate_image_from_text
@@ -219,6 +220,14 @@ class AdViewSet(viewsets.ModelViewSet):
         ad.save()
 
         return Response({'status': 'revision_requested'})
+
+    @action(detail=False, methods=['get'])
+    def revision_requests(self, request):
+        if not getattr(request.user, 'is_staff', False):
+            return Response({'error': 'Admin only'}, status=403)
+        qs = Ad.objects.filter(status='revision_requested').select_related('client').order_by('-updated_at')
+        serializer = RevisionRequestSerializer(qs, many=True)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def save_generated_assets(self, request, pk=None):
@@ -587,7 +596,8 @@ class AdViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def generate_video_clip(self, request):
-        """Generate a video clip from a text prompt using Google's Veo API."""
+        """Generate a video clip from a text prompt using Google's Veo API.
+        Optionally accepts an input_image (base64 PNG) for image-conditioned generation."""
         if not getattr(request.user, 'is_staff', False):
             return Response({'error': 'Admin only'}, status=403)
 
@@ -600,6 +610,7 @@ class AdViewSet(viewsets.ModelViewSet):
         target_duration = int(request.data.get('target_duration_seconds', 0)) or None
         aspect_ratio = request.data.get('aspect_ratio', '16:9')
         model_id = request.data.get('model', 'veo-3.1-generate-preview')
+        input_image = request.data.get('input_image', '').strip() or None
 
         # Validate model
         model_info = get_model_info(model_id)
@@ -608,7 +619,7 @@ class AdViewSet(viewsets.ModelViewSet):
 
         try:
             api_key = _get_manager_api_key(request.user)
-            video_file, resp_headers = generate_video_from_text(prompt, duration_seconds=duration, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key, target_duration_seconds=target_duration)
+            video_file, resp_headers = generate_video_from_text(prompt, duration_seconds=duration, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key, target_duration_seconds=target_duration, input_image_base64=input_image)
 
             log_api_usage(model_id, success=True, response_headers=resp_headers)
 
@@ -948,6 +959,7 @@ def creative_session_add_event(request, pk):
         prompt=request.data.get('prompt', ''),
         settings=request.data.get('settings', {}),
         generated_media=generated_media,
+        file=request.data.get('file', ''),
     )
 
     # Update session title from first generate event
@@ -958,3 +970,25 @@ def creative_session_add_event(request, pk):
 
     serializer = CreativeSessionEventSerializer(event, context={'request': request})
     return Response(serializer.data, status=201)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def upload_media(request):
+    """Upload an arbitrary media file and return its URL."""
+    file = request.FILES.get('file')
+    if not file:
+        return Response({'error': 'No file provided'}, status=400)
+
+    import uuid
+    ext = file.name.split('.')[-1] if '.' in file.name else 'webm'
+    filename = f'uploads/{uuid.uuid4().hex}.{ext}'
+    from django.conf import settings
+    path = settings.MEDIA_ROOT / filename
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, 'wb') as f:
+        for chunk in file.chunks():
+            f.write(chunk)
+
+    url = request.build_absolute_uri(f'{settings.MEDIA_URL}{filename}')
+    return Response({'url': url}, status=201)
