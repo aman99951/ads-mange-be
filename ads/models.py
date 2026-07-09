@@ -24,7 +24,9 @@ def get_remaining_quota():
     return result
 
 
-def log_api_usage(model_id, success=True, response_headers=None):
+def log_api_usage(model_id, success=True, response_headers=None, credit_cost=0):
+    # Save a record for actual API call tracking
+    ApiUsageLog.objects.create(model_id=model_id, success=success, credit_cost=credit_cost)
     if response_headers:
         update_ratelimit_from_headers(dict(response_headers))
     return get_remaining_quota()
@@ -34,6 +36,7 @@ class ApiUsageLog(models.Model):
     """Tracks each Google API request made for quota management."""
     model_id = models.CharField(max_length=100, help_text='Google model ID used')
     success = models.BooleanField(default=True)
+    credit_cost = models.IntegerField(default=0, help_text='Credits consumed (0 = free request)')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -287,6 +290,29 @@ class CreativeSessionEvent(models.Model):
 
     def __str__(self):
         return f'{self.event_type} at {self.created_at}'
+
+
+class CreditUsageLog(models.Model):
+    """Tracks each generation's credit cost per manager per month."""
+    user = models.ForeignKey(
+        get_user_model(), on_delete=models.CASCADE, related_name='credit_usage_logs'
+    )
+    model_id = models.CharField(max_length=100, db_index=True, help_text='Google model ID used')
+    credit_cost = models.IntegerField(help_text='Number of credits consumed for this generation')
+    media_type = models.CharField(max_length=10, help_text='image or video')
+    generated_media = models.ForeignKey(
+        'GeneratedMedia', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='credit_logs'
+    )
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = 'Credit Usage Log'
+        verbose_name_plural = 'Credit Usage Logs'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'{self.model_id} ({self.credit_cost} cr) @ {self.created_at.date()}'
 
 
 class VideoFeedback(models.Model):

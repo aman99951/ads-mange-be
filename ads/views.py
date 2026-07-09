@@ -9,7 +9,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated, IsAdminUser, AllowAny
 from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
-from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, GeneratedMedia, VideoFeedback, CreativeSession, CreativeSessionEvent, get_remaining_quota, log_api_usage
+from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, GeneratedMedia, VideoFeedback, CreativeSession, CreativeSessionEvent, CreditUsageLog, ApiUsageLog, get_remaining_quota
 from .serializers import (
     TargetAreaSerializer, TargetAudienceSerializer, LanguageSerializer,
     AdListSerializer, AdDetailSerializer, AdStatusSerializer,
@@ -17,7 +17,9 @@ from .serializers import (
     DeveloperAppSerializer, AdDeveloperPushSerializer, PublicAdSerializer,
     DeveloperAdListSerializer, GeneratedMediaSerializer, VideoFeedbackSerializer,
     CreativeSessionListSerializer, CreativeSessionDetailSerializer, CreativeSessionCreateSerializer, CreativeSessionEventSerializer,
-    RevisionRequestSerializer
+    RevisionRequestSerializer,
+    CreditUsageLogSerializer, MonthlyCreditStatsSerializer,
+    ApiUsageLogSerializer
 )
 from .services.veo import generate_video_from_text
 from .services.imagen import generate_image_from_text
@@ -27,6 +29,8 @@ from .services.openrouter import enhance_prompt as enhance_prompt_service
 from .services.google_models import get_model_info, IMAGE_MODELS, VIDEO_MODELS
 from .services.google_quota import QuotaExceededError
 from accounts.models import Manager
+from django.db.models import Sum, Count
+from datetime import datetime
 
 
 def _get_manager_api_key(user):
@@ -231,30 +235,65 @@ class AdViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def save_generated_assets(self, request, pk=None):
-        """Save AI-generated assets from the studio back to this ad."""
+        """Save AI-generated assets from the studio back to this ad.
+        Supports both main video (asset_ids) and language-specific videos (language_assets).
+        """
         if not getattr(request.user, 'is_staff', False):
             return Response({'error': 'Admin only'}, status=403)
         ad = self.get_object()
 
-        asset_ids = request.data.get('asset_ids', [])
-        if not asset_ids:
-            return Response({'error': 'asset_ids is required (list of GeneratedMedia IDs)'}, status=400)
-
-        media_objects = GeneratedMedia.objects.filter(id__in=asset_ids)
-        if not media_objects.exists():
-            return Response({'error': 'No valid assets found'}, status=404)
+        from django.core.files.storage import default_storage
+        from django.core.files import File
 
         saved_count = 0
-        # Pick the first video as final_asset
-        first_video = media_objects.filter(media_type='video').first()
-        if first_video:
-            from django.core.files.storage import default_storage
-            file_path = first_video.file.name if hasattr(first_video.file, 'name') else str(first_video.file)
-            if default_storage.exists(file_path):
-                from django.core.files import File
-                f = default_storage.open(file_path)
-                ad.final_asset.save(f'studio_{first_video.id}_{file_path.split("/")[-1]}', File(f), save=True)
-                saved_count += 1
+        lang_saved = []
+
+        # ── Save main video from asset_ids ──
+        asset_ids = request.data.get('asset_ids', [])
+        if asset_ids:
+            media_objects = GeneratedMedia.objects.filter(id__in=asset_ids)
+            first_video = media_objects.filter(media_type='video').first()
+            if first_video:
+                file_path = first_video.file.name if hasattr(first_video.file, 'name') else str(first_video.file)
+                if default_storage.exists(file_path):
+                    f = default_storage.open(file_path)
+                    ad.final_asset.save(f'studio_{first_video.id}_{file_path.split("/")[-1]}', File(f), save=True)
+                    saved_count += 1
+
+        # ── Save language-specific assets ──
+        language_assets = request.data.get('language_assets', [])
+        for item in language_assets:
+            lang_id = item.get('language_id')
+            media_id = item.get('generated_media_id')
+            prompt = item.get('prompt', '')
+            if not lang_id or not media_id:
+                continue
+            try:
+                lang = Language.objects.get(id=lang_id)
+                media = GeneratedMedia.objects.get(id=media_id)
+            except (Language.DoesNotExist, GeneratedMedia.DoesNotExist):
+                continue
+
+            # Copy the media file to the language asset
+            media_path = media.file.name if hasattr(media.file, 'name') else str(media.file)
+            if not default_storage.exists(media_path):
+                continue
+
+            asset_obj, _ = AdLanguageAsset.objects.get_or_create(
+                ad=ad, language=lang,
+                defaults={'status': 'completed', 'prompt': prompt}
+            )
+            f = default_storage.open(media_path)
+            asset_obj.asset.save(f'lang_{lang.id}_{media_id}_{media_path.split("/")[-1]}', File(f), save=True)
+            asset_obj.status = 'completed'
+            if prompt:
+                asset_obj.prompt = prompt
+            asset_obj.save()
+            lang_saved.append({'language_id': lang.id, 'language_name': lang.name})
+            saved_count += 1
+
+        if saved_count == 0:
+            return Response({'error': 'No valid assets found to save'}, status=400)
 
         # Log an iteration
         AdIteration.objects.create(
@@ -271,6 +310,7 @@ class AdViewSet(viewsets.ModelViewSet):
             'status': 'pending_approval',
             'message': f'Saved {saved_count} asset(s) to campaign. Client will be notified.',
             'saved_count': saved_count,
+            'language_assets_saved': lang_saved,
         })
 
     @action(detail=True, methods=['post'])
@@ -559,8 +599,6 @@ class AdViewSet(viewsets.ModelViewSet):
             else:
                 image_file, resp_headers = generate_image_from_text(prompt, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key)
 
-            log_api_usage(model_id, success=True, response_headers=resp_headers)
-
             from django.core.files.storage import default_storage
             from django.core.files.base import ContentFile
             path = default_storage.save(f'creative_images/{image_file.name}', ContentFile(image_file.read()))
@@ -620,8 +658,6 @@ class AdViewSet(viewsets.ModelViewSet):
         try:
             api_key = _get_manager_api_key(request.user)
             video_file, resp_headers = generate_video_from_text(prompt, duration_seconds=duration, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key, target_duration_seconds=target_duration, input_image_base64=input_image)
-
-            log_api_usage(model_id, success=True, response_headers=resp_headers)
 
             from django.core.files.storage import default_storage
             from django.core.files.base import ContentFile
@@ -970,6 +1006,125 @@ def creative_session_add_event(request, pk):
 
     serializer = CreativeSessionEventSerializer(event, context={'request': request})
     return Response(serializer.data, status=201)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def log_credit_usage(request):
+    """Log credit consumption for a generation."""
+    serializer = CreditUsageLogSerializer(data=request.data)
+    if serializer.is_valid():
+        serializer.save(user=request.user)
+        return Response(serializer.data, status=201)
+    return Response(serializer.errors, status=400)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def monthly_credit_stats(request):
+    """Get this month's credit usage stats for the current user."""
+    now = timezone.now()
+    try:
+        year = int(request.query_params.get('year', now.year))
+    except (ValueError, TypeError):
+        year = now.year
+    try:
+        month = int(request.query_params.get('month', now.month))
+    except (ValueError, TypeError):
+        month = now.month
+
+    logs = CreditUsageLog.objects.filter(
+        user=request.user,
+        created_at__year=year,
+        created_at__month=month,
+    )
+
+    total = logs.aggregate(
+        total_credits=Sum('credit_cost') or 0,
+        total_generations=Count('id') or 0,
+    )
+    image_stats = logs.filter(media_type='image').aggregate(
+        image_credits=Sum('credit_cost') or 0,
+        image_generations=Count('id') or 0,
+    )
+    video_stats = logs.filter(media_type='video').aggregate(
+        video_credits=Sum('credit_cost') or 0,
+        video_generations=Count('id') or 0,
+    )
+
+    data = {
+        'total_credits': total['total_credits'] or 0,
+        'total_generations': total['total_generations'] or 0,
+        'image_credits': image_stats['image_credits'] or 0,
+        'image_generations': image_stats['image_generations'] or 0,
+        'video_credits': video_stats['video_credits'] or 0,
+        'video_generations': video_stats['video_generations'] or 0,
+        'year': year,
+        'month': month,
+    }
+    serializer = MonthlyCreditStatsSerializer(data)
+    return Response(serializer.data)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def api_tracking_logs(request):
+    """Return API usage logs categorized by billing status for the tracking page.
+    Supports pagination via page and page_size query params."""
+    logs = ApiUsageLog.objects.all()
+
+    # Filtering
+    model = request.query_params.get('model', '')
+    status_filter = request.query_params.get('status', 'all')
+
+    if model:
+        logs = logs.filter(model_id__icontains=model)
+    if status_filter == 'billed_success':
+        logs = logs.filter(model_id__contains='_output:') | logs.filter(model_id__contains='_gen:', success=True)
+        logs = logs.exclude(model_id__contains='_billed_fail').exclude(model_id__contains='_poll').exclude(model_id__contains='_fail:')
+    elif status_filter == 'billed_failed':
+        logs = logs.filter(model_id__contains='_billed_fail')
+    elif status_filter == 'free':
+        logs = logs.filter(success=False).exclude(model_id__contains='_billed_fail')
+
+    # Total count before pagination
+    total = logs.count()
+
+    # Pagination
+    try:
+        page = int(request.query_params.get('page', 1))
+    except (ValueError, TypeError):
+        page = 1
+    try:
+        page_size = int(request.query_params.get('page_size', 10))
+    except (ValueError, TypeError):
+        page_size = 10
+    page_size = min(max(page_size, 1), 100)  # Clamp between 1 and 100
+    offset = (page - 1) * page_size
+    logs_page = logs[offset:offset + page_size]
+
+    serializer = ApiUsageLogSerializer(logs_page, many=True)
+
+    # Summary counts (always based on filtered logs, not paginated)
+    all_logs = ApiUsageLog.objects.all()
+    summary = {
+        'total': all_logs.count(),
+        'billed_success': (all_logs.filter(model_id__contains='_output:') | all_logs.filter(model_id__contains='_gen:', success=True)).exclude(model_id__contains='_billed_fail').exclude(model_id__contains='_poll').exclude(model_id__contains='_fail:').count(),
+        'billed_failed': all_logs.filter(model_id__contains='_billed_fail').count(),
+        'free_polling': all_logs.filter(model_id__contains='_poll:').count(),
+        'free_transient': all_logs.filter(model_id__contains='_gen:', success=False).count(),
+    }
+
+    return Response({
+        'logs': serializer.data,
+        'summary': summary,
+        'pagination': {
+            'page': page,
+            'page_size': page_size,
+            'total': total,
+            'total_pages': max(1, (total + page_size - 1) // page_size),
+        },
+    })
 
 
 @api_view(['POST'])

@@ -27,4 +27,7 @@ urlpatterns = [
     path('creative-sessions/<int:pk>/', views.creative_session_detail, name='creative-session-detail'),
     path('creative-sessions/<int:pk>/add-event/', views.creative_session_add_event, name='creative-session-add-event'),
     path('upload-media/', views.upload_media, name='upload-media'),
+    path('api-tracking-logs/', views.api_tracking_logs, name='api-tracking-logs'),
+    path('credit-usage/log/', views.log_credit_usage, name='log-credit-usage'),
+    path('credit-usage/monthly-stats/', views.monthly_credit_stats, name='monthly-credit-stats'),
 ]

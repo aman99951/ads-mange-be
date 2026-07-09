@@ -10,6 +10,8 @@ import requests
 from django.conf import settings
 from django.core.files.base import ContentFile
 from .google_quota import QuotaExceededError, mark_quota_exhausted, update_ratelimit_from_headers
+from ..models import log_api_usage
+from .google_models import get_credit_cost
 
 
 NANO_BANANA_API_KEY = os.environ.get('GEMINI_STUDIO_KEY') or getattr(settings, 'GEMINI_STUDIO_KEY', '')
@@ -46,6 +48,25 @@ IMAGE_SIZE_MAP = {
 }
 
 
+def _transient_retry(url, headers, body, timeout=180, max_attempts=3):
+    """Retry POST on transient failures (429, 5xx, network issues) that DON'T bill."""
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=body, timeout=timeout)
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_attempts:
+                time.sleep(2 ** attempt * 2)
+                continue
+            return resp
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            if attempt < max_attempts:
+                time.sleep(2 ** attempt * 2)
+                continue
+            raise
+    raise last_exc or Exception(f'Request failed after {max_attempts} attempts')
+
+
 def generate_nano_banana_image(prompt, aspect_ratio='1:1', model_name=None, api_key=None):
     model = model_name or 'gemini-3.1-flash-image'
     url = f'{NANO_BANANA_BASE_URL}/interactions'
@@ -72,8 +93,11 @@ def generate_nano_banana_image(prompt, aspect_ratio='1:1', model_name=None, api_
         },
     }
 
-    resp = requests.post(url, headers=headers, json=body, timeout=180)
+    # Retry TRANSIENT errors only (429, 5xx) — these don't cost
+    resp = _transient_retry(url, headers, body, timeout=180)
     resp_headers = dict(resp.headers)
+    # Log EVERY nano-banana image generation API call (paid POST)
+    log_api_usage(f'nb_gen:{model}', success=resp.status_code == 200, response_headers=resp_headers, credit_cost=get_credit_cost(model) or 0)
     if resp.status_code == 429:
         update_ratelimit_from_headers(resp_headers)
         mark_quota_exhausted(resp.text)
@@ -98,6 +122,8 @@ def generate_nano_banana_image(prompt, aspect_ratio='1:1', model_name=None, api_
                 break
     
     if not output_image:
+        # Google billed us (200) but returned no image
+        log_api_usage(f'nb_billed_fail:{model}', success=False, credit_cost=get_credit_cost(model) or 0)
         raise Exception(f'No image in response: {list(data.keys())}')
 
     # Extract base64 data
@@ -106,6 +132,8 @@ def generate_nano_banana_image(prompt, aspect_ratio='1:1', model_name=None, api_
         image_data = output_image.get('data', '')
     
     if not image_data:
+        # Google billed us (200) but returned empty image data
+        log_api_usage(f'nb_billed_fail:{model}', success=False, credit_cost=get_credit_cost(model) or 0)
         raise Exception('No image data in output')
 
     raw = base64.b64decode(image_data)

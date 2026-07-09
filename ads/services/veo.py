@@ -5,6 +5,8 @@ import requests
 from django.conf import settings
 from django.core.files.base import ContentFile
 from .google_quota import QuotaExceededError, mark_quota_exhausted, update_ratelimit_from_headers
+from ..models import log_api_usage
+from .google_models import get_credit_cost
 
 
 GEMINI_STUDIO_KEY = os.environ.get('GEMINI_STUDIO_KEY') or getattr(settings, 'GEMINI_STUDIO_KEY', '')
@@ -14,13 +16,16 @@ VEO_BASE_URL = os.environ.get('VEO_BASE_URL') or 'https://generativelanguage.goo
 VEO_SUPPORTED_ASPECT_RATIOS = {'16:9', '9:16', '4:3', '3:4'}
 
 
-def _poll_operation(operation_name, effective_key, poll_interval=5):
+def _poll_operation(operation_name, effective_key, model, poll_interval=5):
     while True:
         op_resp = requests.get(
             f'{VEO_BASE_URL}/{operation_name}',
             headers={'X-Goog-Api-Key': effective_key},
             timeout=30,
         )
+        # Log every poll request (GET, not billable but tracked for visibility)
+        log_api_usage(f'veo_poll:{operation_name.split("/")[-1][:20]}', success=op_resp.status_code == 200, credit_cost=0)
+
         if op_resp.status_code != 200:
             raise Exception(f'Veo operation poll error {op_resp.status_code}: {op_resp.text}')
 
@@ -29,10 +34,35 @@ def _poll_operation(operation_name, effective_key, poll_interval=5):
         if op_data.get('done'):
             if 'error' in op_data:
                 err = op_data['error']
+                # Google billed us (POST returned 200) but generation failed mid-way
+                log_api_usage(f'veo_billed_fail:{model}', success=False, credit_cost=get_credit_cost(model) or 0)
                 raise Exception(f'Veo generation failed: {err.get("message", str(err))}')
             return op_data
 
         time.sleep(poll_interval)
+
+
+def _transient_retry(url, headers, body, timeout=60, max_attempts=3):
+    """Retry POST on transient failures (429, 5xx, network issues) that DON'T bill.
+    These errors happen BEFORE Google accepts the request, so no cost.
+    Does NOT retry on 200+processing failures (those already billed)."""
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.post(url, headers=headers, json=body, timeout=timeout)
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < max_attempts:
+                wait = 2 ** attempt * 2  # 4s, 8s, 16s
+                time.sleep(wait)
+                continue
+            return resp
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            if attempt < max_attempts:
+                wait = 2 ** attempt * 2
+                time.sleep(wait)
+                continue
+            raise
+    raise last_exc or Exception(f'Request failed after {max_attempts} attempts')
 
 
 def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, model, poll_interval=5, input_image_base64=None, input_image_mime='image/png'):
@@ -58,49 +88,44 @@ def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, mod
         },
     }
 
-    for attempt in range(3):
-        resp = requests.post(url, headers=headers, json=body, timeout=60)
-        resp_headers = dict(resp.headers)
-        if resp.status_code == 429:
-            update_ratelimit_from_headers(resp_headers)
-            mark_quota_exhausted(resp.text)
-            raise QuotaExceededError(resp.text, response_headers=resp_headers)
-        if resp.status_code == 200:
-            operation = resp.json()
-            operation_name = operation.get('name')
-            if not operation_name:
-                raise Exception(f'No operation name in response: {operation}')
-            op_data = _poll_operation(operation_name, effective_key, poll_interval)
-            generated_samples = (
-                op_data.get('response', {})
-                .get('generateVideoResponse', {})
-                .get('generatedSamples', [])
-            )
-            if not generated_samples:
-                raise Exception('No video generated: empty predictions')
-            video_info = generated_samples[0].get('video', {})
-            video_uri = video_info.get('uri', '')
-            if video_uri:
-                return video_uri, resp_headers
-            raise Exception(f'Unexpected response format: {list(op_data.get("response", {}).keys())}')
-        if resp.status_code == 400 and 'high demand' in resp.text and attempt < 2:
-            time.sleep(10 * (attempt + 1))
-            continue
+    # Retry on TRANSIENT errors (429, 5xx) — these don't cost since request was rejected
+    # Does NOT retry on accepted requests that fail mid-processing (those already billed)
+    resp = _transient_retry(url, headers, body, timeout=60)
+    resp_headers = dict(resp.headers)
+
+    # Log EVERY Veo generation request (paid POST call)
+    log_api_usage(f'veo_gen:{model}', success=resp.status_code == 200, credit_cost=get_credit_cost(model) or 0)
+
+    if resp.status_code == 429:
+        update_ratelimit_from_headers(resp_headers)
+        mark_quota_exhausted(resp.text)
+        raise QuotaExceededError(resp.text, response_headers=resp_headers)
+
+    if resp.status_code != 200:
         raise Exception(f'Veo API error {resp.status_code}: {resp.text}')
 
+    operation = resp.json()
+    operation_name = operation.get('name')
+    if not operation_name:
+        raise Exception(f'No operation name in response: {operation}')
 
-def _download_to_temp(uri, api_key, temp_dir, index):
-    """Download a video URI to a temp file and return the path."""
-    import os
-    headers = {'X-Goog-Api-Key': api_key}
-    resp = requests.get(uri, headers=headers, stream=True, timeout=120)
-    if resp.status_code != 200:
-        raise Exception(f'Failed to download video: {resp.status_code}')
-    ext = 'mp4' if 'mp4' in resp.headers.get('Content-Type', '') else 'webm'
-    path = os.path.join(temp_dir, f'clip_{index}.{ext}')
-    with open(path, 'wb') as f:
-        f.write(resp.content)
-    return path
+    op_data = _poll_operation(operation_name, effective_key, model, poll_interval)
+    generated_samples = (
+        op_data.get('response', {})
+        .get('generateVideoResponse', {})
+        .get('generatedSamples', [])
+    )
+    if not generated_samples:
+        # Google billed us but returned no video
+        log_api_usage(f'veo_billed_fail:{model}', success=False, credit_cost=get_credit_cost(model) or 0)
+        raise Exception('No video generated: empty predictions')
+    video_info = generated_samples[0].get('video', {})
+    video_uri = video_info.get('uri', '')
+    if video_uri:
+        return video_uri, resp_headers
+    # Google billed us but returned unexpected format
+    log_api_usage(f'veo_billed_fail:{model}', success=False, credit_cost=get_credit_cost(model) or 0)
+    raise Exception(f'Unexpected response format: {list(op_data.get("response", {}).keys())}')
 
 
 def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', poll_interval=5, model_name=None, api_key=None, target_duration_seconds=None, input_image_base64=None, input_image_mime='image/png'):
@@ -111,51 +136,14 @@ def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', po
         aspect_ratio = '16:9'
 
     target = target_duration_seconds or duration_seconds
-    valid_durations = sorted([4, 6, 8], reverse=True)
+    # Veo generates a single clip up to 8 seconds max. No splitting needed.
+    clip_duration = min(8, target) if target else 8
+    uri, resp_headers = _start_generation(prompt, clip_duration, aspect_ratio, effective_key, model, poll_interval, input_image_base64, input_image_mime)
 
-    # Generate as many independent clips as needed to reach the target duration
-    # (Gemini API does NOT support video extension via previous_video_uri)
-    remaining = target
-    clip_durations = []
-    while remaining > 0:
-        dur = max((v for v in valid_durations if v <= remaining), default=min(valid_durations))
-        clip_durations.append(dur)
-        remaining -= dur
-
-    video_uris = []
-    resp_headers = {}
-    for dur in clip_durations:
-        uri, headers = _start_generation(prompt, dur, aspect_ratio, effective_key, model, poll_interval, input_image_base64, input_image_mime)
-        video_uris.append(uri)
-        resp_headers = headers
-
-    if len(video_uris) == 1:
-        return _download_from_uri(video_uris[0], prompt, effective_key), resp_headers
-
-    # Multiple clips — concatenate with FFmpeg
-    import tempfile, subprocess, shutil, os
-    temp_dir = tempfile.mkdtemp()
-    try:
-        clip_paths = [_download_to_temp(u, effective_key, temp_dir, i) for i, u in enumerate(video_uris)]
-        concat_file = os.path.join(temp_dir, 'concat.txt')
-        with open(concat_file, 'w') as f:
-            for p in clip_paths:
-                f.write(f"file '{p.replace(chr(39), chr(92) + chr(39))}'\n")
-
-        output_path = os.path.join(temp_dir, 'output.mp4')
-        subprocess.run(
-            ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', concat_file, '-c', 'copy', '-y', output_path],
-            capture_output=True, text=True, timeout=120, check=True,
-        )
-
-        content_type = 'video/mp4'
-        raw = open(output_path, 'rb').read()
-        from django.core.files.base import ContentFile
-        return ContentFile(raw, name=_filename(prompt, content_type)), resp_headers
-    except subprocess.CalledProcessError as e:
-        raise Exception(f'FFmpeg concat failed: {e.stderr}')
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    # Log the video download — if we reach here, output was delivered successfully
+    log_api_usage(f'veo_output:{model}', success=True, credit_cost=get_credit_cost(model) or 0)
+    video_file = _download_from_uri(uri, prompt, effective_key)
+    return video_file, resp_headers
 
 
 def _download_from_gcs(gcs_uri, prompt):

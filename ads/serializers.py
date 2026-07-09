@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, GeneratedMedia, VideoFeedback, CreativeSession, CreativeSessionEvent
+from .models import TargetArea, TargetAudience, Language, Ad, AdIteration, AdLanguageAsset, DeveloperApp, AdDeveloperPush, GeneratedMedia, VideoFeedback, CreativeSession, CreativeSessionEvent, CreditUsageLog, ApiUsageLog
 
 
 class TargetAreaSerializer(serializers.ModelSerializer):
@@ -200,7 +200,7 @@ class CreativeSessionListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CreativeSession
-        fields = ['id', 'title', 'media_type', 'created_at', 'updated_at', 'asset_count', 'preview_url']
+        fields = ['id', 'title', 'media_type', 'settings', 'created_at', 'updated_at', 'asset_count', 'preview_url']
 
     def get_asset_count(self, obj):
         return obj.events.filter(event_type='generate').count()
@@ -247,6 +247,49 @@ class CreativeSessionDetailSerializer(serializers.ModelSerializer):
         model = CreativeSession
         fields = '__all__'
         read_only_fields = ['user', 'created_at', 'updated_at']
+
+
+class CreditUsageLogSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CreditUsageLog
+        fields = ['id', 'model_id', 'credit_cost', 'media_type', 'generated_media', 'created_at']
+        read_only_fields = ['user', 'created_at']
+
+
+class MonthlyCreditStatsSerializer(serializers.Serializer):
+    total_credits = serializers.IntegerField()
+    image_credits = serializers.IntegerField()
+    video_credits = serializers.IntegerField()
+    total_generations = serializers.IntegerField()
+    image_generations = serializers.IntegerField()
+    video_generations = serializers.IntegerField()
+    year = serializers.IntegerField()
+    month = serializers.IntegerField()
+
+
+class ApiUsageLogSerializer(serializers.ModelSerializer):
+    category = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ApiUsageLog
+        fields = ['id', 'model_id', 'success', 'credit_cost', 'category', 'created_at']
+
+    def get_category(self, obj):
+        mid = obj.model_id
+        # Billed but failed (Google returned 200 but no output delivered)
+        if '_billed_fail' in mid:
+            return 'billed_failed'
+        # Output confirmed delivered (Veo output download)
+        if '_output:' in mid:
+            return 'billed_success'
+        # Generation POST calls: success=True means billed, False means transient (free)
+        if '_gen:' in mid:
+            return 'billed_success' if obj.success else 'free_transient'
+        # Veo poll requests (GET, not billed)
+        if '_poll:' in mid:
+            return 'free_polling'
+        # Fallback
+        return 'billed_success' if obj.success else 'free_transient'
 
 
 class CreativeSessionCreateSerializer(serializers.ModelSerializer):
