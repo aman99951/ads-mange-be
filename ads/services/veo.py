@@ -141,7 +141,8 @@ def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', po
     uri, resp_headers = _start_generation(prompt, clip_duration, aspect_ratio, effective_key, model, poll_interval, input_image_base64, input_image_mime)
 
     # Log the video download — if we reach here, output was delivered successfully
-    log_api_usage(f'veo_output:{model}', success=True, credit_cost=get_credit_cost(model) or 0)
+    # Note: credit_cost=0 because the cost was already counted in veo_gen above
+    log_api_usage(f'veo_output:{model}', success=True, credit_cost=0)
     video_file = _download_from_uri(uri, prompt, effective_key)
     return video_file, resp_headers
 

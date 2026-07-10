@@ -221,7 +221,7 @@ class CreativeSessionEventSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = CreativeSessionEvent
-        fields = ['id', 'event_type', 'prompt', 'settings', 'file', 'model_used', 'duration_seconds', 'created_at']
+        fields = ['id', 'event_type', 'prompt', 'settings', 'generated_media', 'file', 'model_used', 'duration_seconds', 'created_at']
 
     def get_file(self, obj):
         if obj.generated_media and obj.generated_media.file:
