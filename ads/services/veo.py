@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import time
 import requests
 from django.conf import settings
@@ -65,6 +66,14 @@ def _transient_retry(url, headers, body, timeout=60, max_attempts=3):
     raise last_exc or Exception(f'Request failed after {max_attempts} attempts')
 
 
+def _parse_data_url(data_url):
+    """Parse a data URL and return (raw_base64, mime_type)."""
+    match = re.match(r'^data:([^;]+);base64,(.+)$', data_url, re.DOTALL)
+    if match:
+        return match.group(2), match.group(1)
+    return data_url, 'image/png'
+
+
 def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, model, poll_interval=5, input_image_base64=None, input_image_mime='image/png'):
     url = f'{VEO_BASE_URL}/models/{model}:predictLongRunning'
     headers = {
@@ -74,9 +83,10 @@ def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, mod
 
     instance = {'prompt': prompt}
     if input_image_base64:
+        raw_base64, detected_mime = _parse_data_url(input_image_base64)
         instance['image'] = {
-            'bytesBase64Encoded': input_image_base64,
-            'mimeType': input_image_mime,
+            'bytesBase64Encoded': raw_base64,
+            'mimeType': detected_mime,
         }
 
     body = {
