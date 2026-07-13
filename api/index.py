@@ -7,6 +7,7 @@ django.setup()
 
 from django.core.management import call_command
 call_command('migrate', '--noinput')
+call_command('collectstatic', '--noinput')
 
 from django.contrib.auth.models import User
 if not User.objects.filter(username='admin').exists():
