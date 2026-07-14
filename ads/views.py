@@ -734,28 +734,23 @@ class AdViewSet(viewsets.ModelViewSet):
         if 'image_file' in request.FILES:
             ad.asset = request.FILES['image_file']
         elif image_url:
-            # Try to copy from creative_images path
-            import os
-            from django.conf import settings
+            from django.core.files.storage import default_storage
+            from django.core.files import File
             local_path = image_url.replace(request.build_absolute_uri('/'), '')
-            full_path = os.path.join(settings.MEDIA_ROOT, local_path) if hasattr(settings, 'MEDIA_ROOT') else None
-            if full_path and os.path.exists(full_path):
-                from django.core.files import File
-                with open(full_path, 'rb') as f:
-                    ad.asset.save(os.path.basename(full_path), File(f), save=False)
+            if default_storage.exists(local_path):
+                f = default_storage.open(local_path)
+                ad.asset.save(os.path.basename(local_path), File(f), save=False)
 
         # Handle video
         if 'video_file' in request.FILES:
             ad.final_asset = request.FILES['video_file']
         elif video_url:
-            import os
-            from django.conf import settings
+            from django.core.files.storage import default_storage
+            from django.core.files import File
             local_path = video_url.replace(request.build_absolute_uri('/'), '')
-            full_path = os.path.join(settings.MEDIA_ROOT, local_path) if hasattr(settings, 'MEDIA_ROOT') else None
-            if full_path and os.path.exists(full_path):
-                from django.core.files import File
-                with open(full_path, 'rb') as f:
-                    ad.final_asset.save(os.path.basename(full_path), File(f), save=False)
+            if default_storage.exists(local_path):
+                f = default_storage.open(local_path)
+                ad.final_asset.save(os.path.basename(local_path), File(f), save=False)
 
         ad.save()
 
@@ -1136,14 +1131,10 @@ def upload_media(request):
         return Response({'error': 'No file provided'}, status=400)
 
     import uuid
+    from django.core.files.storage import default_storage
     ext = file.name.split('.')[-1] if '.' in file.name else 'webm'
     filename = f'uploads/{uuid.uuid4().hex}.{ext}'
-    from django.conf import settings
-    path = settings.MEDIA_ROOT / filename
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, 'wb') as f:
-        for chunk in file.chunks():
-            f.write(chunk)
+    saved_path = default_storage.save(filename, file)
 
-    url = request.build_absolute_uri(f'{settings.MEDIA_URL}{filename}')
+    url = request.build_absolute_uri(default_storage.url(saved_path))
     return Response({'url': url}, status=201)
