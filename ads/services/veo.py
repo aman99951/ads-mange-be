@@ -16,7 +16,7 @@ GEMINI_STUDIO_KEY = os.environ.get('GEMINI_STUDIO_KEY') or getattr(settings, 'GE
 VEO_BASE_URL = os.environ.get('VEO_BASE_URL') or 'https://generativelanguage.googleapis.com/v1beta'
 
 
-VEO_SUPPORTED_ASPECT_RATIOS = {'16:9', '9:16', '4:3', '3:4'}
+VEO_SUPPORTED_ASPECT_RATIOS = {'16:9', '9:16'}
 VEO_SUPPORTED_IMAGE_MIMES = {'image/png', 'image/jpeg', 'image/webp'}
 VEO_MAX_IMAGE_BASE64_CHARS = 15 * 1024 * 1024   # ~15MB base64 ≈ ~11MB decoded
 VEO_MIN_IMAGE_DIMENSION = 64                     # minimum width or height in px
