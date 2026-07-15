@@ -20,11 +20,21 @@ def _detect_model():
     return 'openrouter/free'
 
 
-def _build_system_prompt(media_type, width, height):
+def _build_system_prompt(media_type, width, height, edit_mode=False):
     is_image = media_type == 'image'
     media = "image" if is_image else "video"
     camera_detail = "shot on 85mm lens, shallow depth of field" if is_image else "shot on Red Komodo, 24fps, cinematic movement"
     aspect = f"{width}:{height}" if width and height else "1:1"
+
+    edit_instruction = ""
+    if edit_mode:
+        edit_instruction = """
+6. **EDIT MODE**: The user is editing an existing image/video. They have a source image loaded as reference. Your job is to enhance their edit instructions ONLY — add visual details, style, and lighting around their idea. 
+   - NEVER remove or replace the user's core idea. 
+   - NEVER change "a man fixing a pipe" into "a plumber in a workshop" — keep the EXACT subject and action.
+   - You MAY add: lighting, colors, mood, camera angle, style, textures, atmosphere.
+   - You MAY clarify ambiguous descriptions.
+   - The enhanced prompt MUST still clearly describe the same scene the user asked for."""
 
     return f"""You are an expert AI prompt engineer for {media} generation models (Imagen, Veo, DALL-E, Midjourney).
 
@@ -42,7 +52,7 @@ Your task: Take a user's raw prompt and produce TWO things — an enhanced promp
 
 5. **FORMAT**: You MUST return your response in EXACTLY this format (no extra text, no markdown):
 ENHANCED_PROMPT: <the enhanced prompt>
-NEGATIVE_PROMPT: <comma-separated list of negative elements>"""
+NEGATIVE_PROMPT: <comma-separated list of negative elements>{edit_instruction}"""
 
 
 def _strip_safety_lines(text):
@@ -60,7 +70,7 @@ def _strip_safety_lines(text):
     return result.strip()
 
 
-def enhance_prompt(user_prompt, media_type='image', width=1024, height=1024):
+def enhance_prompt(user_prompt, media_type='image', width=1024, height=1024, edit_mode=False):
     """
     Send the user's prompt to OpenRouter and return an enhanced version
     along with a negative prompt.
@@ -70,7 +80,7 @@ def enhance_prompt(user_prompt, media_type='image', width=1024, height=1024):
     if not OPENROUTER_API_KEY:
         raise Exception('OPENROUTER_API_KEY is not configured')
 
-    system_prompt = _build_system_prompt(media_type, width, height)
+    system_prompt = _build_system_prompt(media_type, width, height, edit_mode=edit_mode)
 
     headers = {
         'Authorization': f'Bearer {OPENROUTER_API_KEY}',
@@ -91,17 +101,27 @@ def enhance_prompt(user_prompt, media_type='image', width=1024, height=1024):
         'max_tokens': 600,
     }
 
-    try:
-        resp = requests.post(
-            f'{OPENROUTER_BASE_URL}/chat/completions',
-            headers=headers,
-            json=body,
-            timeout=30,
-        )
-    except requests.exceptions.Timeout:
-        raise Exception('OpenRouter request timed out. Please try again.')
-    except requests.exceptions.ConnectionError:
-        raise Exception('Could not connect to OpenRouter. Check your network connection.')
+    last_err = None
+    for attempt in range(3):
+        try:
+            resp = requests.post(
+                f'{OPENROUTER_BASE_URL}/chat/completions',
+                headers=headers,
+                json=body,
+                timeout=30,
+            )
+            if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+                import time
+                time.sleep(2 ** (attempt + 1))
+                continue
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_err = e
+            if attempt < 2:
+                import time
+                time.sleep(2 ** (attempt + 1))
+                continue
+            raise Exception('OpenRouter request failed. Please try again.')
 
     if resp.status_code != 200:
         error_detail = ''

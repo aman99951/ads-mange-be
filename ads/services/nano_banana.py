@@ -67,7 +67,7 @@ def _transient_retry(url, headers, body, timeout=180, max_attempts=3):
     raise last_exc or Exception(f'Request failed after {max_attempts} attempts')
 
 
-def generate_nano_banana_image(prompt, aspect_ratio='1:1', model_name=None, api_key=None):
+def generate_nano_banana_image(prompt, aspect_ratio='1:1', model_name=None, api_key=None, input_image=None):
     model = model_name or 'gemini-3.1-flash-image'
     url = f'{NANO_BANANA_BASE_URL}/interactions'
 
@@ -80,11 +80,14 @@ def generate_nano_banana_image(prompt, aspect_ratio='1:1', model_name=None, api_
     ar = ASPECT_RATIO_MAP.get(aspect_ratio, '1:1')
     image_size = IMAGE_SIZE_MAP.get(ar, '2K')
 
+    input_parts = [{'type': 'text', 'text': prompt}]
+    if input_image:
+        mime, data = _parse_data_url(input_image)
+        input_parts.append({'type': 'image', 'image': {'mime_type': mime, 'data': data}})
+
     body = {
         'model': model,
-        'input': [
-            {'type': 'text', 'text': prompt},
-        ],
+        'input': input_parts,
         'response_format': {
             'type': 'image',
             'mime_type': 'image/jpeg',
@@ -145,3 +148,12 @@ def _nb_filename(prompt, model):
     safe = ''.join(c if c.isalnum() or c in ' _-' else '_' for c in prompt)[:40].strip()
     model_short = model.replace('gemini-', '').replace('-', '_')
     return f'nano_banana_{model_short}_{safe}_{int(time.time())}.jpg'
+
+
+def _parse_data_url(data_url):
+    """Parse 'data:image/png;base64,AAAA' → ('image/png', 'AAAA')."""
+    if data_url.startswith('data:'):
+        header, b64 = data_url.split(',', 1)
+        mime = header.split(';')[0].replace('data:', '')
+        return mime, b64
+    return 'image/png', data_url

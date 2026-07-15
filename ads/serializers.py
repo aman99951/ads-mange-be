@@ -217,11 +217,12 @@ class CreativeSessionListSerializer(serializers.ModelSerializer):
 class CreativeSessionEventSerializer(serializers.ModelSerializer):
     file = serializers.SerializerMethodField()
     model_used = serializers.SerializerMethodField()
+    media_type = serializers.SerializerMethodField()
     duration_seconds = serializers.SerializerMethodField()
 
     class Meta:
         model = CreativeSessionEvent
-        fields = ['id', 'event_type', 'prompt', 'settings', 'generated_media', 'file', 'model_used', 'duration_seconds', 'created_at']
+        fields = ['id', 'event_type', 'prompt', 'settings', 'generated_media', 'file', 'model_used', 'media_type', 'duration_seconds', 'created_at']
 
     def get_file(self, obj):
         if obj.generated_media and obj.generated_media.file:
@@ -235,6 +236,9 @@ class CreativeSessionEventSerializer(serializers.ModelSerializer):
 
     def get_model_used(self, obj):
         return obj.generated_media.model_used if obj.generated_media else None
+
+    def get_media_type(self, obj):
+        return obj.generated_media.media_type if obj.generated_media else None
 
     def get_duration_seconds(self, obj):
         return obj.generated_media.duration_seconds if obj.generated_media else None

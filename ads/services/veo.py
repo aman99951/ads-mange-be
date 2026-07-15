@@ -2,6 +2,8 @@ import os
 import json
 import re
 import time
+import base64
+import io
 import requests
 from django.conf import settings
 from django.core.files.base import ContentFile
@@ -15,6 +17,10 @@ VEO_BASE_URL = os.environ.get('VEO_BASE_URL') or 'https://generativelanguage.goo
 
 
 VEO_SUPPORTED_ASPECT_RATIOS = {'16:9', '9:16', '4:3', '3:4'}
+VEO_SUPPORTED_IMAGE_MIMES = {'image/png', 'image/jpeg', 'image/webp'}
+VEO_MAX_IMAGE_BASE64_CHARS = 15 * 1024 * 1024   # ~15MB base64 ≈ ~11MB decoded
+VEO_MIN_IMAGE_DIMENSION = 64                     # minimum width or height in px
+VEO_MAX_IMAGE_DIMENSION = 4096                   # maximum width or height in px
 
 
 def _poll_operation(operation_name, effective_key, model, poll_interval=5):
@@ -67,14 +73,101 @@ def _transient_retry(url, headers, body, timeout=60, max_attempts=3):
 
 
 def _parse_data_url(data_url):
-    """Parse a data URL and return (raw_base64, mime_type)."""
+    """Parse a data URL and return (raw_base64, mime_type).
+
+    Raises ValueError if the input is not a valid base64 data URL.
+    """
     match = re.match(r'^data:([^;]+);base64,(.+)$', data_url, re.DOTALL)
     if match:
         return match.group(2), match.group(1)
-    return data_url, 'image/png'
+    raise ValueError(
+        'Invalid input_image: expected a data URL (data:<mime>;base64,...). '
+        'Raw URLs or non-base64 data are not accepted.'
+    )
 
 
-def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, model, poll_interval=5, input_image_base64=None, input_image_mime='image/png'):
+def _validate_image(input_image_base64):
+    """Strict pre-flight validation of input_image BEFORE any Veo API call.
+
+    Validates:
+      1. Data URL format
+      2. MIME type is supported by Veo
+      3. Base64 payload size
+      4. Base64 decodes successfully
+      5. Decoded bytes are a real image (opened with Pillow)
+      6. Image dimensions within Veo limits
+
+    Returns (raw_base64, mime_type) on success.
+    Raises ValueError on ANY failure — never reaches Veo API.
+    """
+    from PIL import Image
+
+    # 1. Must be a valid data URL
+    raw_base64, mime_type = _parse_data_url(input_image_base64)
+
+    # 2. MIME type must be supported
+    if mime_type not in VEO_SUPPORTED_IMAGE_MIMES:
+        raise ValueError(
+            f'Unsupported image type: {mime_type}. '
+            f'Supported: {", ".join(sorted(VEO_SUPPORTED_IMAGE_MIMES))}'
+        )
+
+    # 3. Base64 size check (before decoding — fast)
+    if len(raw_base64) > VEO_MAX_IMAGE_BASE64_CHARS:
+        size_mb = len(raw_base64) // (1024 * 1024)
+        raise ValueError(
+            f'Image too large ({size_mb}MB). Maximum allowed is ~11MB.'
+        )
+
+    if len(raw_base64) < 100:
+        raise ValueError('Image data is too small or empty.')
+
+    # 4. Decode base64 — catches corrupted/truncated data
+    try:
+        image_bytes = base64.b64decode(raw_base64, validate=True)
+    except Exception:
+        raise ValueError(
+            'Image data is corrupted (invalid base64). '
+            'Please re-upload the image.'
+        )
+
+    if len(image_bytes) < 50:
+        raise ValueError('Decoded image data is too small — likely not a valid image.')
+
+    # 5. Open with Pillow — verifies it is a real decodable image
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img.verify()  # verifies file integrity (checks headers, not full decode)
+    except Exception:
+        raise ValueError(
+            'The file is not a valid image or is corrupted. '
+            'Please upload a PNG, JPEG, or WebP file.'
+        )
+
+    # Re-open after verify() (verify() consumes the file handle)
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        width, height = img.size
+    except Exception:
+        raise ValueError('Could not read image dimensions — file may be corrupted.')
+
+    # 6. Dimension limits
+    if width < VEO_MIN_IMAGE_DIMENSION or height < VEO_MIN_IMAGE_DIMENSION:
+        raise ValueError(
+            f'Image is too small ({width}x{height}). '
+            f'Minimum dimension is {VEO_MIN_IMAGE_DIMENSION}x{VEO_MIN_IMAGE_DIMENSION}.'
+        )
+
+    if width > VEO_MAX_IMAGE_DIMENSION or height > VEO_MAX_IMAGE_DIMENSION:
+        raise ValueError(
+            f'Image is too large ({width}x{height}). '
+            f'Maximum dimension is {VEO_MAX_IMAGE_DIMENSION}x{VEO_MAX_IMAGE_DIMENSION}.'
+        )
+
+    return raw_base64, mime_type
+
+
+def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, model, poll_interval=5, input_image_base64=None, input_image_mime='image/png', last_frame_base64=None, last_frame_mime='image/png'):
     url = f'{VEO_BASE_URL}/models/{model}:predictLongRunning'
     headers = {
         'X-Goog-Api-Key': effective_key,
@@ -83,10 +176,17 @@ def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, mod
 
     instance = {'prompt': prompt}
     if input_image_base64:
-        raw_base64, detected_mime = _parse_data_url(input_image_base64)
+        # Strict validation — raises ValueError before ANY Veo API call
+        raw_base64, detected_mime = _validate_image(input_image_base64)
         instance['image'] = {
             'bytesBase64Encoded': raw_base64,
             'mimeType': detected_mime,
+        }
+    if last_frame_base64:
+        raw_last, detected_last_mime = _validate_image(last_frame_base64)
+        instance['lastFrame'] = {
+            'bytesBase64Encoded': raw_last,
+            'mimeType': detected_last_mime,
         }
 
     body = {
@@ -138,17 +238,43 @@ def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, mod
     raise Exception(f'Unexpected response format: {list(op_data.get("response", {}).keys())}')
 
 
-def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', poll_interval=5, model_name=None, api_key=None, target_duration_seconds=None, input_image_base64=None, input_image_mime='image/png'):
+def generate_video_from_text(prompt, duration_seconds=8, aspect_ratio='16:9', poll_interval=5, model_name=None, api_key=None, target_duration_seconds=None, input_image_base64=None, input_image_mime='image/png', last_frame_base64=None, last_frame_mime='image/png'):
+    # ── Strict pre-flight validation — ALL checks BEFORE any Veo API call ──
+
+    # Prompt validation
+    prompt = (prompt or '').strip()
+    if not prompt:
+        raise ValueError('Prompt is required and cannot be empty.')
+    if len(prompt) > 5000:
+        raise ValueError(f'Prompt too long ({len(prompt)} chars). Maximum is 5000 characters.')
+
+    # API key validation
     model = model_name or 'veo-3.1-generate-preview'
     effective_key = api_key or GEMINI_STUDIO_KEY
+    if not effective_key:
+        raise ValueError('No API key configured. Please set a Google API key.')
 
+    # Aspect ratio validation
     if aspect_ratio not in VEO_SUPPORTED_ASPECT_RATIOS:
-        aspect_ratio = '16:9'
+        raise ValueError(
+            f'Unsupported aspect ratio: {aspect_ratio}. '
+            f'Supported: {", ".join(sorted(VEO_SUPPORTED_ASPECT_RATIOS))}'
+        )
 
+    # Duration validation
     target = target_duration_seconds or duration_seconds
-    # Veo generates a single clip up to 8 seconds max. No splitting needed.
     clip_duration = min(8, target) if target else 8
-    uri, resp_headers = _start_generation(prompt, clip_duration, aspect_ratio, effective_key, model, poll_interval, input_image_base64, input_image_mime)
+    if clip_duration not in (4, 6, 8):
+        clip_duration = 8
+
+    # Image validation (if provided) — decoded & verified with Pillow BEFORE any API call
+    if input_image_base64:
+        _validate_image(input_image_base64)
+    if last_frame_base64:
+        _validate_image(last_frame_base64)
+
+    # ── All validation passed — safe to call Veo ──
+    uri, resp_headers = _start_generation(prompt, clip_duration, aspect_ratio, effective_key, model, poll_interval, input_image_base64, input_image_mime, last_frame_base64, last_frame_mime)
 
     # Log the video download — if we reach here, output was delivered successfully
     # Note: credit_cost=0 because the cost was already counted in veo_gen above

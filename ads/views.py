@@ -1,8 +1,12 @@
 import csv
 import io
 import os
+import re
+import base64
 import threading
 import time
+import requests as http_requests
+from urllib.parse import urlparse
 from django.utils import timezone
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action, api_view, permission_classes
@@ -583,6 +587,7 @@ class AdViewSet(viewsets.ModelViewSet):
 
         aspect_ratio = request.data.get('aspect_ratio', '1:1')
         model_id = request.data.get('model', 'gemini-3.1-flash-image')
+        input_image = request.data.get('input_image')
 
         # Validate model
         model_info = get_model_info(model_id)
@@ -593,9 +598,9 @@ class AdViewSet(viewsets.ModelViewSet):
             api_key = _get_manager_api_key(request.user)
             api_type = model_info.get('api_type', 'predictLongRunning')
             if api_type == 'interactions':
-                image_file, resp_headers = generate_nano_banana_image(prompt, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key)
+                image_file, resp_headers = generate_nano_banana_image(prompt, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key, input_image=input_image)
             elif api_type == 'generateContent':
-                image_file, resp_headers = generate_gemini_image(prompt, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key)
+                image_file, resp_headers = generate_gemini_image(prompt, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key, input_image=input_image)
             else:
                 image_file, resp_headers = generate_image_from_text(prompt, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key)
 
@@ -649,6 +654,7 @@ class AdViewSet(viewsets.ModelViewSet):
         aspect_ratio = request.data.get('aspect_ratio', '16:9')
         model_id = request.data.get('model', 'veo-3.1-generate-preview')
         input_image = request.data.get('input_image', '').strip() or None
+        last_frame = request.data.get('last_frame', '').strip() or None
 
         # Validate model
         model_info = get_model_info(model_id)
@@ -657,7 +663,7 @@ class AdViewSet(viewsets.ModelViewSet):
 
         try:
             api_key = _get_manager_api_key(request.user)
-            video_file, resp_headers = generate_video_from_text(prompt, duration_seconds=duration, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key, target_duration_seconds=target_duration, input_image_base64=input_image)
+            video_file, resp_headers = generate_video_from_text(prompt, duration_seconds=duration, aspect_ratio=aspect_ratio, model_name=model_id, api_key=api_key, target_duration_seconds=target_duration, input_image_base64=input_image, last_frame_base64=last_frame)
 
             from django.core.files.storage import default_storage
             from django.core.files.base import ContentFile
@@ -692,6 +698,168 @@ class AdViewSet(viewsets.ModelViewSet):
                 'quota': quota,
                 'google_api_quota': quota,
             }, status=429)
+        except ValueError as e:
+            # Invalid input_image format — client error
+            return Response({'error': str(e)}, status=400)
+        except Exception as e:
+            error_msg = str(e)
+            # Surface Veo 400 (bad request) as 400, not 500
+            if 'Veo API error 400' in error_msg:
+                return Response({'error': error_msg}, status=400)
+            return Response({'error': error_msg}, status=500)
+
+    @action(detail=False, methods=['post'])
+    def proxy_image(self, request):
+        """Fetch an image server-side and return as base64 data URL.
+        Bypasses CORS restrictions on cross-origin images (e.g. S3)."""
+        image_url = (request.data.get('url') or '').strip()
+        if not image_url:
+            return Response({'error': 'url is required'}, status=400)
+
+        parsed = urlparse(image_url)
+        if parsed.scheme not in ('http', 'https'):
+            return Response({'error': 'Only http/https URLs are allowed'}, status=400)
+
+        hostname = parsed.hostname or ''
+        if hostname in ('localhost', '127.0.0.1', '::1', '0.0.0.0') or hostname.endswith('.local'):
+            return Response({'error': 'Internal URLs are not allowed'}, status=400)
+
+        import ipaddress
+        try:
+            ip = ipaddress.ip_address(hostname)
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                return Response({'error': 'Private network URLs are not allowed'}, status=400)
+        except ValueError:
+            pass
+
+        try:
+            resp = http_requests.get(image_url, timeout=30, stream=True)
+            if resp.status_code != 200:
+                return Response({'error': f'Failed to fetch image: {resp.status_code}'}, status=400)
+
+            content_type = resp.headers.get('Content-Type', 'image/png')
+            mime_map = {
+                'image/jpg': 'image/jpeg',
+                'image/jpeg': 'image/jpeg',
+                'image/png': 'image/png',
+                'image/webp': 'image/webp',
+                'image/gif': 'image/gif',
+            }
+            mime_type = mime_map.get(content_type.split(';')[0].strip().lower(), 'image/png')
+
+            image_bytes = resp.content
+            if len(image_bytes) > 15 * 1024 * 1024:
+                return Response({'error': 'Image too large (max 11MB)'}, status=400)
+
+            b64 = base64.b64encode(image_bytes).decode('ascii')
+            data_url = f'data:{mime_type};base64,{b64}'
+            return Response({'data_url': data_url, 'mime_type': mime_type})
+        except http_requests.Timeout:
+            return Response({'error': 'Image fetch timed out'}, status=400)
+        except Exception as e:
+            return Response({'error': f'Failed to fetch image: {str(e)}'}, status=400)
+
+    @action(detail=False, methods=['delete'])
+    def delete_asset(self, request):
+        """Delete a generated asset (GeneratedMedia + linked session events).
+        Accepts: { "media_id": <int> } or { "event_id": <int> } or both."""
+        media_id = request.data.get('media_id')
+        event_id = request.data.get('event_id')
+
+        if not media_id and not event_id:
+            return Response({'error': 'media_id or event_id is required'}, status=400)
+
+        deleted_media = False
+        deleted_events = 0
+        media = None
+        event = None
+
+        if media_id:
+            try:
+                media = GeneratedMedia.objects.get(id=media_id, user=request.user)
+            except GeneratedMedia.DoesNotExist:
+                pass
+
+        if event_id:
+            try:
+                event = CreativeSessionEvent.objects.get(id=event_id, session__user=request.user)
+            except CreativeSessionEvent.DoesNotExist:
+                pass
+
+        if not media and event and event.generated_media_id:
+            try:
+                media = GeneratedMedia.objects.get(id=event.generated_media_id, user=request.user)
+            except GeneratedMedia.DoesNotExist:
+                pass
+
+        if media:
+            linked_events = CreativeSessionEvent.objects.filter(generated_media=media)
+            deleted_events = linked_events.count()
+            linked_events.delete()
+            if media.file:
+                try:
+                    from django.core.files.storage import default_storage
+                    default_storage.delete(media.file.name)
+                except Exception:
+                    pass
+            media.delete()
+            deleted_media = True
+        elif event:
+            event.delete()
+            deleted_events = 1
+
+        return Response({'deleted_media': deleted_media, 'deleted_events': deleted_events})
+
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+    def media_proxy(self, request):
+        """Proxy a remote media URL (e.g. S3) with CORS headers.
+        Usage: GET /api/ads/media_proxy/?url=<encoded_url>"""
+        from django.http import StreamingHttpResponse
+        import ipaddress as _ipaddress
+
+        image_url = request.query_params.get('url', '').strip()
+        if not image_url:
+            return Response({'error': 'url query param is required'}, status=400)
+
+        parsed = urlparse(image_url)
+        if parsed.scheme not in ('http', 'https'):
+            return Response({'error': 'Only http/https URLs are allowed'}, status=400)
+
+        hostname = parsed.hostname or ''
+        if hostname in ('localhost', '127.0.0.1', '::1', '0.0.0.0') or hostname.endswith('.local'):
+            return Response({'error': 'Internal URLs are not allowed'}, status=400)
+        try:
+            ip = _ipaddress.ip_address(hostname)
+            if ip.is_private or ip.is_loopback or ip.is_link_local:
+                return Response({'error': 'Private network URLs are not allowed'}, status=400)
+        except ValueError:
+            pass
+
+        try:
+            resp = http_requests.get(image_url, timeout=30, stream=True)
+            if resp.status_code != 200:
+                return Response({'error': f'Upstream error: {resp.status_code}'}, status=502)
+
+            content_type = resp.headers.get('Content-Type', 'application/octet-stream')
+            content_length = resp.headers.get('Content-Length')
+
+            django_resp = StreamingHttpResponse(
+                resp.iter_content(chunk_size=64 * 1024),
+                status=200,
+                content_type=content_type,
+            )
+            django_resp['Access-Control-Allow-Origin'] = '*'
+            django_resp['Access-Control-Allow-Methods'] = 'GET, HEAD, OPTIONS'
+            django_resp['Access-Control-Allow-Headers'] = '*'
+            if content_length:
+                django_resp['Content-Length'] = content_length
+            cache_etag = resp.headers.get('ETag')
+            if cache_etag:
+                django_resp['ETag'] = cache_etag
+            django_resp['Cache-Control'] = 'public, max-age=86400'
+            return django_resp
+        except http_requests.Timeout:
+            return Response({'error': 'Upstream timeout'}, status=502)
         except Exception as e:
             return Response({'error': str(e)}, status=500)
 
@@ -833,16 +1001,17 @@ def enhance_prompt(request):
     Enhance a generation prompt using OpenRouter AI.
     Preserves the user's language and adds rich detail.
     """
-    prompt = request.data.get('prompt', '').strip()
+    prompt = (request.data.get('prompt') or '').strip()
     if not prompt:
         return Response({'error': 'prompt is required'}, status=400)
 
     media_type = request.data.get('media_type', 'image')
     width = request.data.get('width', 1024)
     height = request.data.get('height', 1024)
+    edit_mode = request.data.get('edit_mode', False)
 
     try:
-        result = enhance_prompt_service(prompt, media_type=media_type, width=width, height=height)
+        result = enhance_prompt_service(prompt, media_type=media_type, width=width, height=height, edit_mode=edit_mode)
         return Response({
             'original': prompt,
             'enhanced': result['enhanced'],
@@ -850,7 +1019,10 @@ def enhance_prompt(request):
             'media_type': media_type,
         })
     except Exception as e:
-        return Response({'error': str(e)}, status=500)
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f'Enhance prompt error: {e}')
+        return Response({'error': str(e)}, status=502)
 
 
 @api_view(['GET', 'POST'])
