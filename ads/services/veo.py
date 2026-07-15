@@ -189,6 +189,12 @@ def _start_generation(prompt, duration_seconds, aspect_ratio, effective_key, mod
             'mimeType': detected_last_mime,
         }
 
+    # Veo requires: lastFrame only works when image is also present, and only at 8s
+    if 'lastFrame' in instance and 'image' not in instance:
+        raise ValueError('End frame requires a start frame image. Please upload or select a start frame image as well.')
+    if 'lastFrame' in instance and duration_seconds != 8:
+        raise ValueError('First+last frame generation only supports 8-second duration.')
+
     body = {
         'instances': [instance],
         'parameters': {
