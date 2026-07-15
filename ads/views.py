@@ -652,6 +652,9 @@ class AdViewSet(viewsets.ModelViewSet):
         duration = min((v for v in (4, 6, 8) if v >= duration), default=8)
         target_duration = int(request.data.get('target_duration_seconds', 0)) or None
         aspect_ratio = request.data.get('aspect_ratio', '16:9')
+        # Veo only supports 16:9 and 9:16 — clamp anything else
+        if aspect_ratio not in ('16:9', '9:16'):
+            aspect_ratio = '16:9'
         model_id = request.data.get('model', 'veo-3.1-generate-preview')
         input_image = request.data.get('input_image', '').strip() or None
         last_frame = request.data.get('last_frame', '').strip() or None
